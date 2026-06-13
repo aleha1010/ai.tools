@@ -1,109 +1,331 @@
-# Ralph Loop - TDD Implementation Orchestrator
+# Ralph Loop
 
-Автономный цикл разработки с multi-agent review перед коммитом.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Структура
+Автономный TDD-оркестратор с мульти-агентным ревью перед коммитом.
+
+## Обзор
+
+Ralph Loop автоматизирует цикл реализации: **Реализация → Ревью → Коммит**. Качество кода обеспечивается запуском 5 специализированных review-агентов перед каждым коммитом.
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Ralph Loop                        │
+│                                                      │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐       │
+│  │Реализация│───▶│  Ревью   │───▶│  Коммит  │       │
+│  │  Агент   │    │  (5 шт)  │    │          │       │
+│  └──────────┘    └──────────┘    └──────────┘       │
+│       │               │                              │
+│       │          ┌────┴────┐                        │
+│       │          │         │                        │
+│       │     APPROVED  REJECTED                       │
+│       │          │         │                         │
+│       │          ▼         ▼                         │
+│       │       Коммит   Исправление                   │
+└──────┴──────────────────────────────────────────────┘
+```
+
+## Возможности
+
+- **Двухфазный подход**: Реализация отделена от коммита
+- **Мульти-агентное ревью**: 5 специализированных ревьюеров параллельно
+- **State Machine**: Явное отслеживание состояния с поддержкой восстановления
+- **Circuit Breaker**: Остановка после 3 последовательных неудач
+- **Структурированный вывод**: JSON-протокол коммуникации
+- **Интеграция с Spec Kit**: Совместим с командами specify
+
+## Быстрый старт
+
+```bash
+# Базовый запуск
+./scripts/ralph_loop.sh --tasks-path specs/001-feature/tasks.md
+
+# Без ревью (только для hotfix)
+./scripts/ralph_loop.sh --tasks-path specs/001-feature/tasks.md --no-review
+
+# Подробный вывод
+./scripts/ralph_loop.sh --tasks-path specs/001-feature/tasks.md --verbose
+```
+
+## Требования
+
+| Зависимость | Версия | Назначение |
+|-------------|--------|------------|
+| `kilo` | любая | AI agent CLI |
+| `jq` | >=1.6 | Парсинг JSON |
+| `git` | >=2.0 | Контроль версий |
+
+## Архитектура
+
+### Структура директорий
 
 ```
 ralph-loop/
 ├── README.md
-├── prompts/
-│   ├── ralph-iterate.md   # Agent prompt для реализации задач
-│   └── ralph-review.md    # Agent prompt для мульти-агентного ревью
 ├── scripts/
-│   └── ralph_loop.sh      # Bash orchestrator (state machine)
-└── docs/
-    └── review-integration-analysis.md
+│   └── ralph_loop.sh      # Bash-оркестратор
+└── prompts/
+    ├── ralph-iterate.md   # Prompt агента реализации
+    └── ralph-review.md    # Prompt агента ревью
 ```
 
-## Использование
-
-```bash
-# Запуск цикла
-./scripts/ralph_loop.sh --tasks-path specs/001-feature/tasks.md
-
-# Без review (для hotfixes)
-./scripts/ralph_loop.sh --tasks-path specs/001-feature/tasks.md --no-review
-
-# С verbose output
-./scripts/ralph_loop.sh --tasks-path specs/001-feature/tasks.md --verbose
-```
-
-## Фазы
+### State Machine
 
 ```
-IDLE → IMPLEMENTING → REVIEWING → COMMITTING → IDLE
-              ↓            ↓
-           FAILED      REJECTED
+         ┌──────────────────────────────────────┐
+         │                                      │
+         ▼                                      │
+       IDLE ──────▶ IMPLEMENTING ──────▶ REVIEWING
+         │                │                   │
+         │                │                   │
+         │                ▼                   ▼
+         │            FAILED             ┌────┴────┐
+         │                │              │         │
+         │                │         APPROVED  REJECTED
+         │                │              │         │
+         │                │              ▼         │
+         │                │         COMMITTING     │
+         │                │              │         │
+         │                │              ▼         │
+         │                │           IDLE ◀──────┘
+         │                │                          
+         ▼                ▼                          
+      COMPLETE         (circuit breaker)            
 ```
 
-### PHASE 1: Implementation
-- Agent читает `tasks.md`, `progress.md`, `plan.md`
-- Реализует одну user story за итерацию
-- НЕ делает commit (отложено до review)
-- Выводит JSON: `{"signal": "USER_STORY_COMPLETE"}`
+### Фазы
 
-### PHASE 2: Review Gate
-- Запускает 5 reviewers параллельно:
-  - `review-analyst` - бизнес-требования
-  - `review-security` - OWASP Top 10, SQL injection
-  - `review-architect-backend` - архитектура, DI, слои
-  - `review-performance` - N+1 queries, AsNoTracking
-  - `review-tester` - AAA pattern, coverage
-- При REJECTED: сохраняет `.ralph_rejection_context.md`
-- Выводит JSON: `{"signal": "REVIEW_APPROVED"}` или `{"signal": "REVIEW_REJECTED"}`
+#### Фаза 1: Реализация
 
-### PHASE 3: Commit
-- Только после REVIEW_APPROVED
-- Пытается использовать Spec Kit git extension
-- Fallback на прямой `git commit`
+Агент (`ralph-iterate.md`):
+1. Читает `tasks.md`, `progress.md`, `plan.md`
+2. Реализует одну user story
+3. Помечает задачи как `[x]`
+4. Выводит: `{"signal": "USER_STORY_COMPLETE"}`
 
-## Требования
+#### Фаза 2: Review Gate
 
-- `jq` - JSON parsing
-- `git` - version control
-- `kilo` - AI agent CLI
+Агент (`ralph-review.md`):
+1. Определяет выполненные задачи
+2. Запускает 5 ревьюеров параллельно:
 
-## Безопасность
+| Ревьюер | Фокус |
+|---------|-------|
+| `review-analyst` | Бизнес-требования, acceptance criteria |
+| `review-security` | OWASP Top 10, SQL injection, XSS |
+| `review-architect-backend` | DI-паттерны, разделение слоёв |
+| `review-performance` | N+1 queries, memory leaks, async |
+| `review-tester` | AAA pattern, coverage, mocks |
 
-- **Command injection**: используется `git commit -F file` вместо `-m`
-- **JSON validation**: whitelist сигналов через `select()`
-- **File permissions**: LOG/STATE files с `chmod 600`
-- **Path traversal**: валидация путей через `realpath`
+3. Агрегирует результаты
+4. Выводит: `{"signal": "REVIEW_APPROVED"}` или `{"signal": "REVIEW_REJECTED"}`
 
-## State Machine
+#### Фаза 3: Коммит
 
-Состояние сохраняется в `.ralph_state.json`:
+Оркестратор (`ralph_loop.sh`):
+1. Создаёт git commit (только после APPROVED)
+2. Включает статус ревью в сообщение коммита
+3. Обновляет progress log
+
+## Конфигурация
+
+### Параметры командной строки
+
+| Параметр | Обязательный | По умолчанию | Описание |
+|----------|--------------|--------------|----------|
+| `--tasks-path PATH` | Да | — | Путь к tasks.md |
+| `--max-iterations N` | Нет | 50 | Максимум итераций (1-1000) |
+| `--no-review` | Нет | false | Отключить Review Gate |
+| `--verbose` | Нет | false | Подробный вывод |
+| `--working-directory DIR` | Нет | . | Рабочая директория |
+
+### Переменные окружения
+
+| Переменная | Описание |
+|------------|----------|
+| `KILO_CMD` | Переопределить команду kilo (для тестов) |
+| `RALPH_TEST_MODE` | `true` для отключения sleep в тестах |
+
+## JSON-протокол
+
+### Реализация завершена
 
 ```json
 {
-  "state": "REVIEWING",
-  "iteration": 15,
-  "current_user_story": "T012",
-  "timestamp": "2026-06-12T12:30:00Z",
-  "pid": 12345
+  "signal": "USER_STORY_COMPLETE",
+  "tasks_completed": ["T001", "T002"],
+  "files_changed": ["src/Service.cs", "tests/ServiceTests.cs"]
 }
 ```
 
-## Circuit Breaker
+### Ревью пройдено
 
-- 3 consecutive failures → остановка
-- 2 review failures → остановка
-- Exponential backoff: 2^n seconds (max 60s)
+```json
+{
+  "signal": "REVIEW_APPROVED",
+  "tasks": ["T001", "T002"],
+  "verdicts": {
+    "analyst": "APPROVED",
+    "security": "APPROVED",
+    "architect": "CONDITIONALLY_APPROVED",
+    "performance": "APPROVED",
+    "tester": "APPROVED"
+  }
+}
+```
 
-## Интеграция с Spec Kit
+### Ревью отклонено
 
-- Совместим с `specify` commands
-- Пытается использовать `.specify/extensions/git/scripts/bash/auto-commit.sh`
-- Игнорирует Spec Kit hooks (известное ограничение)
+```json
+{
+  "signal": "REVIEW_REJECTED",
+  "reviewer": "security",
+  "issues": [
+    "SQL injection в методе GetParticipants",
+    "Отсутствует валидация входных данных"
+  ]
+}
+```
 
-## Known Issues
+### Все задачи выполнены
 
-1. **Нет тестов** для bash-скрипта (рекомендуется bats)
-2. **Prompts не тестируются автоматически** (требуется integration tests)
-3. **Sleep делает тесты медленными** (требуется DI для SLEEP_CMD)
+```json
+{
+  "signal": "COMPLETE"
+}
+```
 
-## История изменений
+## Генерируемые файлы
 
-- **2026-06-12**: Добавлен structured output (JSON), state machine, security fixes
-- **2026-06-10**: Создан на базе кастомного скрипта (обход timeout extension)
+| Файл | Назначение | Права |
+|------|------------|-------|
+| `.ralph_state.json` | State machine tracking | 600 |
+| `.ralph_loop.log` | Лог выполнения | 600 |
+| `.ralph_rejection_context.md` | Контекст для исправления REJECTED | 600 |
+
+### Формат Progress Log
+
+Дописывается в `specs/*/progress.md`:
+
+```markdown
+## Review - 2026-06-12T12:30:00Z
+
+**Задачи**: T001, T002
+
+### Результаты ревью
+
+| Ревьюер | Вердикт | CHK | Проблемы |
+|---------|---------|-----|----------|
+| analyst | APPROVED | CHK001 | 0 HIGH, 0 MEDIUM, 0 LOW |
+| security | APPROVED | CHK002 | 0 HIGH, 0 MEDIUM, 0 LOW |
+| architect | CONDITIONALLY_APPROVED | CHK003 | 0 HIGH, 1 MEDIUM, 0 LOW |
+| performance | APPROVED | CHK004 | 0 HIGH, 0 MEDIUM, 0 LOW |
+| tester | APPROVED | CHK005 | 0 HIGH, 0 MEDIUM, 0 LOW |
+
+### Checklist Items
+
+- [x] CHK001: Задачи T001,T002 соответствуют требованиям
+- [x] CHK002: Задачи T001,T002 безопасны
+- [x] CHK003: Задачи T001,T002 архитектура корректна
+- [x] CHK004: Задачи T001,T002 производительность в норме
+- [x] CHK005: Задачи T001,T002 тесты качественные
+
+### Technical Debt
+
+Нет
+
+### Решение
+
+APPROVED: Все ревьюеры прошли — коммит разрешён
+```
+
+## Обработка ошибок
+
+### Circuit Breaker
+
+- **3 последовательных неудачи реализации** → Остановка
+- **2 последовательных неудачи ревью** → Остановка
+- **Exponential backoff**: 2^n секунд (макс 60с)
+
+### Восстановление
+
+При REJECTED:
+1. Контекст сохраняется в `.ralph_rejection_context.md`
+2. Задачи остаются помеченными `[x]`
+3. Следующая итерация читает контекст и исправляет проблемы
+
+## Безопасность
+
+### Меры защиты
+
+| Угроза | Защита |
+|--------|--------|
+| Command injection | Используется `git commit -F file` вместо `-m` |
+| JSON injection | Whitelist-валидация через `jq select()` |
+| Path traversal | Валидация `realpath` относительно корня проекта |
+| Права файлов | `chmod 600` для log/state файлов |
+
+### Исправленные HIGH-находки
+
+Все HIGH-находки из security review исправлены:
+- ✅ Command injection в git commit
+- ✅ Непроверенный JSON parsing
+- ✅ Проблемы с правами файлов
+
+## Известные ограничения
+
+| Ограничение | Влияние | Митигация |
+|-------------|---------|-----------|
+| Нет тестов для bash-скрипта | Среднее | Использовать bats для критических путей |
+| Prompts не тестируются автоматически | Среднее | Integration tests с mock kilo |
+| Sleep замедляет тесты | Низкое | Переопределить `SLEEP_CMD` в тестах |
+
+## Changelog
+
+### [1.1.0] - 2026-06-12
+
+#### Добавлено
+- Структурированный JSON output protocol
+- State machine с `.ralph_state.json`
+- Файл контекста отклонения для восстановления
+- Поддержка параллельного выполнения ревью
+- Проверка зависимостей `jq` и `git`
+
+#### Изменено
+- Review Gate: signal-based → JSON-based протокол
+- Подсчёт задач: исправлен баг подсчёта всех задач вместо новых
+- Git commit: теперь использует file-based message (security fix)
+
+#### Исправлено
+- Command injection уязвимость в git commit
+- JSON parsing без валидации
+- Некорректный подсчёт выполненных задач
+
+#### Безопасность
+- Добавлен `chmod 600` для log и state файлов
+- Whitelist-валидация для JSON signals
+- File-based commit messages
+
+### [1.0.0] - 2026-06-10
+
+#### Добавлено
+- Начальная реализация
+- Двухфазный подход (реализация → ревью → коммит)
+- Мульти-агентное Review Gate
+- Circuit Breaker
+- Exponential backoff
+
+## Установка в проект
+
+```bash
+# Копирование в проект
+cp -r /Users/alexey/Workspace/ai.tools/ralph-loop ./
+
+# Запуск
+./ralph-loop/scripts/ralph_loop.sh --tasks-path specs/001-feature/tasks.md
+```
+
+## Лицензия
+
+MIT License — см. файл LICENSE.

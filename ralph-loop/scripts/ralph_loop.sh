@@ -13,13 +13,12 @@
 #   --working-directory DIR  Working directory
 #
 # Features:
-#   - Two-phase approach: Implementation → Review → Commit
-#   - Multi-agent review before commit (review-analyst, review-security, etc.)
+#   - One task per iteration with mandatory review
+#   - Multi-agent review before marking task complete
 #   - Circuit breaker: stops after 3 consecutive failures
 #   - Review failure tolerance: 2 review failures before stopping
 #   - Exponential backoff on failures (max 60s)
 #   - Informative output with timestamps
-#   - Safe parameter validation (command injection, path traversal protection)
 #
 
 set -euo pipefail
@@ -36,6 +35,7 @@ REVIEW_PROMPT_FILE=".kilo/prompts/ralph-review.md"
 LOCK_FILE="/tmp/ralph_loop_${USER}.lock"
 LOG_FILE=""
 STATE_FILE=""
+PENDING_TASKS_FILE=""
 #endregion
 
 #region Security Functions
@@ -144,9 +144,10 @@ print_header() {
 print_phase() {
     local phase=$1
     local message=$2
+    local timestamp=$(date +'%H:%M:%S')
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "$phase: $message"
+    echo "[$timestamp] $phase: $message"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 }
@@ -154,15 +155,17 @@ print_phase() {
 print_status() {
     local status=$1
     local message=$2
-    if [[ "$status" == "success" ]]; then
-        echo "✅ $message"
-    elif [[ "$status" == "failure" ]]; then
-        echo "⚠️  $message"
-    elif [[ "$status" == "error" ]]; then
-        echo "❌ $message"
-    elif [[ "$status" == "info" ]]; then
-        echo "ℹ️  $message"
-    fi
+    local timestamp=$(date +'%H:%M:%S')
+    local icon=""
+    
+    case "$status" in
+        success) icon="✅" ;;
+        failure) icon="⚠️ " ;;
+        error)   icon="❌" ;;
+        info)    icon="ℹ️ " ;;
+    esac
+    
+    echo "[$timestamp] $icon $message"
 }
 
 get_incomplete_task_count() {
@@ -171,30 +174,48 @@ get_incomplete_task_count() {
     
     if [[ -f "$tasks_file" ]]; then
         count=$(grep -c "^\s*-\s*\[ \]" "$tasks_file" 2>/dev/null || echo "0")
+        count=$(echo "$count" | tr -d '[:space:]')
     fi
     
-    echo "$count"
+    echo "${count:-0}"
 }
 
-get_completed_task_count() {
+get_first_incomplete_task() {
     local tasks_file="$1"
-    local count=0
+    grep -m 1 "^\s*-\s*\[ \]" "$tasks_file" 2>/dev/null | grep -oE 'T[0-9]+' || echo ""
+}
+
+mark_task_completed() {
+    local tasks_file="$1"
+    local task_id="$2"
     
-    if [[ -f "$tasks_file" ]]; then
-        count=$(grep -c "^\s*-\s*\[x\]" "$tasks_file" 2>/dev/null || echo "0")
+    if [[ -z "$task_id" ]]; then
+        return 1
     fi
     
-    echo "$count"
+    # Mark task as completed in tasks.md (macOS and Linux compatible)
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS requires empty string after -i
+        sed -i '' "s/- \[ \] ${task_id}/- [x] ${task_id}/" "$tasks_file"
+    else
+        # Linux
+        sed -i "s/- \[ \] ${task_id}/- [x] ${task_id}/" "$tasks_file"
+    fi
+    
+    print_status "success" "Task $task_id marked as completed"
 }
 
 print_summary() {
-    local iterations_run=$1
+    local tasks_completed=$1
     local status=$2
+    local total_attempts=${3:-0}
     echo ""
     echo "========================================================"
     echo "  Ralph Loop Summary"
     echo "========================================================"
-    echo "  Iterations run: $iterations_run"
+    echo "  Tasks completed: $tasks_completed"
+    echo "  Total attempts: $total_attempts"
+    echo "  Iterations (retries): $iteration"
     echo "  Status: $status"
     echo "  Log file: $LOG_FILE"
     echo "  Review enabled: $(if [[ "$NO_REVIEW" == "true" ]]; then echo "NO"; else echo "YES"; fi)"
@@ -206,38 +227,26 @@ print_summary() {
 save_state() {
     local state="$1"
     local iteration="$2"
-    local user_story="$3"
+    local current_task="$3"
     
     cat > "$STATE_FILE" << EOF
 {
   "state": "$state",
   "iteration": $iteration,
-  "current_user_story": "$user_story",
+  "current_task": "$current_task",
   "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
   "pid": $$
 }
 EOF
-}
-
-load_state() {
-    if [[ -f "$STATE_FILE" ]]; then
-        cat "$STATE_FILE"
-    else
-        echo '{"state": "IDLE", "iteration": 0, "current_user_story": ""}'
-    fi
-}
-
-get_state_value() {
-    local key="$1"
-    load_state | jq -r ".$key" 2>/dev/null || echo ""
 }
 #endregion
 
 #region Review Gate Functions
 run_review_gate() {
     local iteration=$1
-    local tasks_path=$2
-    local review_prompt_file="$PROJECT_ROOT/$REVIEW_PROMPT_FILE"
+    local task_id=$2
+    local pending_file=$3
+    local review_prompt_file="$REVIEW_PROMPT_FILE"
     
     if [[ "$NO_REVIEW" == "true" ]]; then
         print_status "info" "Review gate disabled (--no-review)"
@@ -247,13 +256,14 @@ run_review_gate() {
     if [[ ! -f "$review_prompt_file" ]]; then
         print_status "failure" "Review prompt not found: $review_prompt_file"
         print_status "info" "Skipping review gate..."
-        return 0
+        return 1
     fi
     
-    print_phase "PHASE 2: Review Gate" "Running multi-agent review"
+    print_phase "PHASE 2: Review Gate" "Reviewing task $task_id"
     
-    # Prepare review prompt with tasks path
-    local PROMPT=$(sed "s|\$TASKS_PATH|$tasks_path|g" "$review_prompt_file")
+    # Prepare review prompt
+    local PROMPT=$(sed "s|\$TASKS_PATH|$TASKS_PATH|g" "$review_prompt_file")
+    PROMPT=$(sed "s|\$PENDING_TASKS_FILE|$pending_file|g" <<< "$PROMPT")
     
     # Run review
     set +e
@@ -262,109 +272,62 @@ run_review_gate() {
     local review_exit_code=$?
     set -e
     
-    # Parse JSON signal with validation
+    # Parse JSON signal
     local signal=""
     local reviewer="unknown"
-    
-    # Extract last JSON object from output
     local json_line=$(echo "$review_output" | grep -oE '\{[^{}]*"signal"[^{}]*\}' | tail -1)
     
     if [[ -n "$json_line" ]]; then
-        # Validate JSON and extract signal with whitelist
-        signal=$(echo "$json_line" | jq -e -r 'select(.signal == "REVIEW_APPROVED" or .signal == "REVIEW_REJECTED" or .signal == "USER_STORY_COMPLETE" or .signal == "COMPLETE") | .signal' 2>/dev/null || echo "")
-        
+        signal=$(echo "$json_line" | jq -e -r 'select(.signal == "REVIEW_APPROVED" or .signal == "REVIEW_REJECTED") | .signal' 2>/dev/null || echo "")
         if [[ -n "$signal" ]]; then
             reviewer=$(echo "$json_line" | jq -r '.reviewer // "unknown"' 2>/dev/null)
         fi
     fi
     
     if [[ "$signal" == "REVIEW_APPROVED" ]]; then
-        print_status "success" "Review PASSED - Commit allowed"
+        print_status "success" "Review PASSED - Task $task_id approved"
         echo ""
         return 0
     elif [[ "$signal" == "REVIEW_REJECTED" ]]; then
-        print_status "error" "Review REJECTED by $reviewer - Commit blocked"
+        print_status "error" "Review REJECTED by $reviewer - Task $task_id needs fixes"
         echo ""
-        # Log rejection
-        echo "[$(date +'%Y-%m-%d %H:%M:%S')] REVIEW_REJECTED by $reviewer at iteration $iteration" >> "$LOG_FILE"
         return 1
     else
-        # Fallback: check for old signal format
-        if echo "$review_output" | grep -q '<promise>REVIEW_APPROVED</promise>'; then
-            print_status "success" "Review PASSED (legacy format) - Commit allowed"
-            echo ""
-            return 0
-        elif echo "$review_output" | grep -q '<promise>REVIEW_REJECTED</promise>'; then
-            print_status "error" "Review REJECTED (legacy format) - Commit blocked"
-            echo ""
-            return 1
-        fi
-        
-        # No clear signal - check exit code
+        # Check exit code as fallback
         if [[ $review_exit_code -ne 0 ]]; then
             print_status "failure" "Review failed with exit code $review_exit_code"
             return 1
         fi
         
-        print_status "failure" "Review result unclear (no signal found)"
-        print_status "info" "Proceeding with caution..."
-        echo ""
+        print_status "info" "Review result unclear - proceeding"
         return 0
     fi
 }
 
 do_commit() {
     local feature_name="$1"
-    local iteration="$2"
-    local review_passed="$3"
+    local task_id="$2"
+    local iteration="$3"
     
     echo ""
-    print_phase "PHASE 3: Commit" "Creating git commit"
+    print_phase "PHASE 3: Commit" "Creating git commit for $task_id"
     
-    # Try to use Spec Kit git extension if available
-    local git_extension_script="$PROJECT_ROOT/.specify/extensions/git/scripts/bash/auto-commit.sh"
-    local commit_message="feat(${feature_name}): User story iteration ${iteration}"
+    local commit_message="feat(${feature_name}): ${task_id}"
     
-    # Add review status to commit message
     if [[ "$NO_REVIEW" != "true" ]]; then
-        if [[ "$review_passed" == "true" ]]; then
-            commit_message="${commit_message}
+        commit_message="${commit_message}
 
-Review: ✅ PASSED (all reviewers approved)"
-        else
-            commit_message="${commit_message}
-
-Review: ⏭️ SKIPPED (--no-review)"
-        fi
+Review: ✅ PASSED"
     fi
     
-    # Write commit message to temp file for git extension
-    local commit_msg_file=$(mktemp)
-    echo "$commit_message" > "$commit_msg_file"
-    
-    if [[ -x "$git_extension_script" ]]; then
-        # Use Spec Kit git extension (respects hooks and config)
-        print_status "info" "Using Spec Kit git extension"
-        GIT_COMMIT_MESSAGE="$commit_message" "$git_extension_script" "after_implement" || {
-            # Fallback to direct git if extension fails
-            print_status "info" "Git extension failed, using direct git commit"
-            git add -A
-            git commit -F "$commit_msg_file"
-        }
-    else
-        # Direct git commit (no Spec Kit integration) - use file for safety
-        git add -A
-        git commit -F "$commit_msg_file"
-    fi
-    
-    rm -f "$commit_msg_file"
+    git add -A
+    git commit -m "$commit_message"
     
     print_status "success" "Committed: $commit_message"
 }
 
 extract_feature_name() {
     local tasks_path="$1"
-    # Extract feature name from path like "specs/001-feature-name/tasks.md"
     local dirname=$(dirname "$tasks_path")
     local basename=$(basename "$dirname")
     echo "$basename"
@@ -373,7 +336,6 @@ extract_feature_name() {
 
 #region Main
 main() {
-    # Check required dependencies
     if ! command -v jq >/dev/null 2>&1; then
         echo "Error: jq is required but not installed. Install with: brew install jq" >&2
         exit 1
@@ -405,10 +367,12 @@ main() {
     
     LOG_FILE="${PROJECT_ROOT}/.ralph_loop.log"
     STATE_FILE="${PROJECT_ROOT}/.ralph_state.json"
+    PENDING_TASKS_FILE="${PROJECT_ROOT}/.ralph_pending_tasks.json"
     
-    # Create log and state files with restrictive permissions
     touch "$LOG_FILE" && chmod 600 "$LOG_FILE"
     touch "$STATE_FILE" && chmod 600 "$STATE_FILE"
+    
+    exec > >(tee -a "$LOG_FILE") 2>&1
     
     PROMPT_FILE="${PROJECT_ROOT}/${PROMPT_FILE}"
     if [[ ! -f "$PROMPT_FILE" ]]; then
@@ -416,12 +380,10 @@ main() {
         exit 1
     fi
     
-    # Review prompt is optional (can be disabled with --no-review)
     if [[ "$NO_REVIEW" != "true" ]]; then
-        REVIEW_PROMPT_FILE="${PROJECT_ROOT}/${REVIEW_PROMPT_FILE}"
+        REVIEW_PROMPT_FILE="${PROJECT_ROOT}/.kilo/prompts/ralph-review.md"
         if [[ ! -f "$REVIEW_PROMPT_FILE" ]]; then
             echo "⚠️  Warning: Review prompt not found: $REVIEW_PROMPT_FILE" >&2
-            echo "⚠️  Review will be skipped" >&2
         fi
     fi
     
@@ -435,7 +397,6 @@ main() {
     echo $$ > "$LOCK_FILE"
     trap 'rm -f "$LOCK_FILE"' EXIT
     
-    # Extract feature name for commit messages
     local FEATURE_NAME=$(extract_feature_name "$TASKS_PATH")
     
     echo "🚀 Запуск Ralph Loop..."
@@ -443,31 +404,44 @@ main() {
     echo "Feature: $FEATURE_NAME"
     echo "Max iterations: $MAX_ITERATIONS"
     echo "Review enabled: $(if [[ "$NO_REVIEW" == "true" ]]; then echo "NO"; else echo "YES"; fi)"
-    echo "Verbose: $VERBOSE"
+    echo "Mode: ONE TASK PER ITERATION"
     echo ""
     
-    local iteration=1
+    local iteration=0
+    local tasks_completed=0
     local consecutive_failures=0
     local max_consecutive_failures=3
     local review_failures=0
     local max_review_failures=2
+    local total_attempts=0
+    local max_total_attempts=$((MAX_ITERATIONS * 10))
     
-    while [[ $iteration -le $MAX_ITERATIONS ]]; do
+    while [[ $total_attempts -lt $max_total_attempts ]]; do
+        ((total_attempts++))
         print_header "$iteration" "$MAX_ITERATIONS"
         
-        # Snapshot completed tasks before this iteration
-        local tasks_before_iteration=$(get_completed_task_count "$TASKS_PATH")
+        # Check for remaining tasks
+        local next_task=$(get_first_incomplete_task "$TASKS_PATH")
         
-        # Save state at start of iteration
-        save_state "IMPLEMENTING" "$iteration" ""
+        if [[ -z "$next_task" ]]; then
+            echo ""
+            save_state "COMPLETE" "$iteration" ""
+            print_status "success" "🎉 All tasks complete!"
+            print_summary "$tasks_completed" "COMPLETE" "$total_attempts"
+            exit 0
+        fi
+        
+        rm -f "$PENDING_TASKS_FILE"
         
         # =====================================================
-        # PHASE 1: Implementation
+        # PHASE 1: Implementation (ONE TASK)
         # =====================================================
         
-        print_phase "PHASE 1: Implementation" "Running agent to implement tasks"
+        print_phase "PHASE 1: Implementation" "Working on task $next_task"
+        save_state "IMPLEMENTING" "$iteration" "$next_task"
         
         local PROMPT=$(sed "s|\$TASKS_PATH|$TASKS_PATH|g" "$PROMPT_FILE")
+        PROMPT=$(sed "s|\$PENDING_TASKS_FILE|$PENDING_TASKS_FILE|g" <<< "$PROMPT")
         PROMPT=$(printf '%s' "$PROMPT")
         
         set +e
@@ -476,69 +450,94 @@ main() {
         set -e
         
         if [[ $exit_code -ne 0 ]]; then
-            save_state "FAILED" "$iteration" ""
+            save_state "FAILED" "$iteration" "$next_task"
             ((consecutive_failures++))
+            ((iteration++))
             
-            echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: Iteration $iteration implementation failed" >> "$LOG_FILE"
-            echo "Exit code: $exit_code" >> "$LOG_FILE"
+            print_status "error" "Iteration $iteration: implementation failed for task $next_task"
             
             print_status "failure" "Implementation failure $consecutive_failures/$max_consecutive_failures"
             
             if [[ $consecutive_failures -ge $max_consecutive_failures ]]; then
                 print_status "error" "Circuit breaker triggered"
-                print_summary "$iteration" "CIRCUIT_BREAKER"
+                print_summary "$tasks_completed" "CIRCUIT_BREAKER" "$total_attempts"
+                exit 1
+            fi
+            
+            if [[ $iteration -ge $MAX_ITERATIONS ]]; then
+                print_status "error" "Max iterations reached"
+                print_summary "$tasks_completed" "MAX_ITERATIONS_REACHED" "$total_attempts"
                 exit 1
             fi
             
             local backoff=$((2 ** consecutive_failures))
-            local max_backoff=60
-            [[ $backoff -gt $max_backoff ]] && backoff=$max_backoff
+            [[ $backoff -gt 60 ]] && backoff=60
             echo "⏳ Waiting ${backoff}s before retry..."
             sleep "$backoff"
             
-            ((iteration++))
             continue
-        else
-            consecutive_failures=0
-            save_state "REVIEWING" "$iteration" ""
-            print_status "success" "Implementation completed"
         fi
+        
+        consecutive_failures=0
         
         # =====================================================
         # PHASE 2: Review Gate
         # =====================================================
         
-        # Check if NEW tasks were completed in this iteration
-        local tasks_after=$(get_completed_task_count "$TASKS_PATH")
-        local tasks_before="${tasks_before_iteration:-0}"
-        local new_tasks_completed=$((tasks_after - tasks_before))
+        if [[ ! -f "$PENDING_TASKS_FILE" ]]; then
+            print_status "info" "No pending task file created - task may already be complete or agent had nothing to do"
+            continue
+        fi
         
-        if [[ $new_tasks_completed -gt 0 ]]; then
-            # New tasks were completed in this iteration, run review
-            set +e
-            run_review_gate "$iteration" "$TASKS_PATH"
-            local review_result=$?
-            set -e
+        local pending_task_id=$(jq -r '.task_id' "$PENDING_TASKS_FILE" 2>/dev/null || echo "")
+        
+        if [[ -z "$pending_task_id" ]]; then
+            print_status "failure" "Invalid pending tasks file"
+            continue
+        fi
+        
+        print_status "info" "Task $pending_task_id ready for review"
+        save_state "REVIEWING" "$iteration" "$pending_task_id"
+        
+        set +e
+        run_review_gate "$iteration" "$pending_task_id" "$PENDING_TASKS_FILE"
+        local review_result=$?
+        set -e
+        
+        if [[ $review_result -ne 0 ]]; then
+            ((review_failures++))
+            ((iteration++))
+            print_status "failure" "Review failure $review_failures/$max_review_failures (iteration $iteration)"
             
-            if [[ $review_result -ne 0 ]]; then
-                ((review_failures++))
-                print_status "failure" "Review failure $review_failures/$max_review_failures"
-                
-                if [[ $review_failures -ge $max_review_failures ]]; then
-                    print_status "error" "Too many review failures"
-                    print_summary "$iteration" "REVIEW_FAILURES"
-                    exit 1
-                fi
-                
-                # Save rejection context for next iteration
-                local last_review_log=$(tail -n 50 "$LOG_FILE" 2>/dev/null || echo "")
-                local rejection_context_file="${PROJECT_ROOT}/.ralph_rejection_context.md"
-                
-                cat > "$rejection_context_file" << EOF
+            if [[ $review_failures -ge $max_review_failures ]]; then
+                print_status "error" "Too many review failures"
+                print_summary "$tasks_completed" "REVIEW_FAILURES" "$total_attempts"
+                exit 1
+            fi
+            
+            if [[ $iteration -ge $MAX_ITERATIONS ]]; then
+                print_status "error" "Max iterations reached"
+                print_summary "$tasks_completed" "MAX_ITERATIONS_REACHED" "$total_attempts"
+                exit 1
+            fi
+            
+            # Save rejection context
+            local last_review_log=$(tail -n 50 "$LOG_FILE" 2>/dev/null || echo "")
+            local rejection_context_file="${PROJECT_ROOT}/.ralph_rejection_context.md"
+            local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+            
+            cat > "$rejection_context_file" << REJECTION_CTX
 # Review Rejection Context
 
 **Iteration**: $iteration
-**Timestamp**: $(date +'%Y-%m-%d %H:%M:%S')
+**Timestamp**: $timestamp
+**Task ID**: $pending_task_id
+
+## ⚠️ ВАЖНО: ИСПРАВЬ ЭТУ ЖЕ ЗАДАЧУ
+
+Твоя задача $pending_task_id была отклонена на review.
+Ты ДОЛЖЕН исправить замечания и снова отправить ЕЁ ЖЕ на review.
+НЕ переходи к следующей задаче пока эта не пройдёт review.
 
 ## Recent Review Log
 
@@ -548,56 +547,43 @@ $last_review_log
 
 ## Action Required
 
-Fix the issues identified by reviewers and continue implementation.
-EOF
-                
-                save_state "REJECTED" "$iteration" ""
-                print_status "info" "Skipping commit, issues need to be fixed"
-                print_status "info" "Rejection context saved to: $rejection_context_file"
-                print_status "info" "Agent should read this file in next iteration"
-                
-                ((iteration++))
-                continue
-            fi
+1. Прочитай замечания reviewers выше
+2. Исправь проблемы в коде
+3. Создай файл $PENDING_TASKS_FILE с task_id: "$pending_task_id"
+4. НЕ начинай новые задачи пока эта не одобрена
+REJECTION_CTX
             
-            save_state "COMMITTING" "$iteration" ""
-            review_failures=0
+            save_state "REJECTED" "$iteration" "$pending_task_id"
+            print_status "info" "Rejection context saved to: $rejection_context_file"
             
-            # =====================================================
-            # PHASE 3: Commit (only if review passed)
-            # =====================================================
-            
-            do_commit "$FEATURE_NAME" "$iteration" "true"
-            save_state "IDLE" "$iteration" ""
-        else
-            # No tasks completed in this iteration
-            save_state "IDLE" "$iteration" ""
-            print_status "info" "No tasks completed in this iteration"
+            continue
         fi
         
         # =====================================================
-        # Check Completion
+        # PHASE 3: Mark complete & Commit
         # =====================================================
         
-        local remaining_tasks=$(get_incomplete_task_count "$TASKS_PATH")
-        if [[ "$remaining_tasks" -eq 0 ]]; then
-            echo ""
-            save_state "COMPLETE" "$iteration" ""
-            print_status "success" "🎉 All tasks complete!"
-            print_summary "$iteration" "COMPLETE"
-            exit 0
-        fi
+        review_failures=0
+        save_state "COMMITTING" "$iteration" "$pending_task_id"
+        
+        mark_task_completed "$TASKS_PATH" "$pending_task_id"
+        do_commit "$FEATURE_NAME" "$pending_task_id" "$iteration"
+        ((tasks_completed++))
+        
+        rm -f "$PENDING_TASKS_FILE"
+        rm -f "${PROJECT_ROOT}/.ralph_rejection_context.md"
+        
+        save_state "IDLE" "$iteration" ""
         
         if [[ "$VERBOSE" == "true" ]]; then
-            echo ""
-            print_status "info" "Remaining tasks: $remaining_tasks"
+            local remaining=$(get_incomplete_task_count "$TASKS_PATH")
+            print_status "info" "Remaining tasks: $remaining"
         fi
         
-        ((iteration++))
-        sleep 2
+        sleep 1
     done
     
-    print_summary "$((iteration - 1))" "MAX_ITERATIONS_REACHED"
+    print_summary "$tasks_completed" "MAX_ATTEMPTS_REACHED" "$total_attempts"
 }
 
 #endregion
