@@ -272,35 +272,74 @@ run_review_gate() {
     local review_exit_code=$?
     set -e
     
-    # Parse JSON signal
-    local signal=""
-    local reviewer="unknown"
-    local json_line=$(echo "$review_output" | grep -oE '\{[^{}]*"signal"[^{}]*\}' | tail -1)
-    
-    if [[ -n "$json_line" ]]; then
-        signal=$(echo "$json_line" | jq -e -r 'select(.signal == "REVIEW_APPROVED" or .signal == "REVIEW_REJECTED") | .signal' 2>/dev/null || echo "")
-        if [[ -n "$signal" ]]; then
-            reviewer=$(echo "$json_line" | jq -r '.reviewer // "unknown"' 2>/dev/null)
-        fi
+    # Check for Kilo session errors
+    if echo "$review_output" | grep -q "Session not found\|Error:"; then
+        print_status "error" "Kilo error - session issue"
+        echo "$review_output" | grep -E "Error:|Session not found" | head -3
+        return 2  # Special code for Kilo errors
     fi
     
-    if [[ "$signal" == "REVIEW_APPROVED" ]]; then
+    # Parse decision from REVIEW RESULTS: block
+    local decision=""
+    decision=$(echo "$review_output" | grep -o "### Decision: APPROVED\|### Decision: REJECTED" | head -1 | sed 's/### Decision: //')
+    
+    if [[ "$decision" == "APPROVED" ]]; then
         print_status "success" "Review PASSED - Task $task_id approved"
         echo ""
         return 0
-    elif [[ "$signal" == "REVIEW_REJECTED" ]]; then
-        print_status "error" "Review REJECTED by $reviewer - Task $task_id needs fixes"
+    elif [[ "$decision" == "REJECTED" ]]; then
+        print_status "error" "Review REJECTED - Task $task_id needs fixes"
         echo ""
+        
+        # Extract REVIEW RESULTS block for agent
+        local review_results_block=""
+        review_results_block=$(echo "$review_output" | sed -n '/^REVIEW RESULTS:/,$p')
+        echo "$review_results_block" > "${PROJECT_ROOT}/.ralph_review_results.md"
+        print_status "info" "Review results saved to .ralph_review_results.md"
+        
+        # Create rejection context immediately (don't rely on main loop)
+        local rejection_context_file="${PROJECT_ROOT}/.ralph_rejection_context.md"
+        local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+        
+        cat > "$rejection_context_file" << REJECTION_CTX
+# Review Rejection Context
+
+**Timestamp**: $timestamp
+**Task ID**: $task_id
+
+## ⚠️ ВАЖНО: ИСПРАВЬ ЭТУ ЖЕ ЗАДАЧУ
+
+Твоя задача $task_id была отклонена на review.
+Ты ДОЛЖЕН исправить замечания и снова отправить ЕЁ ЖЕ на review.
+НЕ переходи к следующей задаче пока эта не пройдёт review.
+
+---
+
+## Review Results
+
+$review_results_block
+
+---
+
+## Action Required
+
+1. Прочитай замечания reviewers выше
+2. Исправь проблемы в коде
+3. Создай файл $PENDING_TASKS_FILE с task_id: "$task_id"
+4. НЕ начинай новые задачи пока эта не одобрена
+REJECTION_CTX
+        
+        print_status "info" "Rejection context saved to: $rejection_context_file"
         return 1
     else
-        # Check exit code as fallback
+        # No valid decision found
         if [[ $review_exit_code -ne 0 ]]; then
             print_status "failure" "Review failed with exit code $review_exit_code"
-            return 1
+            return 2
         fi
         
-        print_status "info" "Review result unclear - proceeding"
-        return 0
+        print_status "failure" "No valid REVIEW RESULTS found in output"
+        return 2
     fi
 }
 
@@ -504,7 +543,29 @@ main() {
         local review_result=$?
         set -e
         
-        if [[ $review_result -ne 0 ]]; then
+        # Handle different return codes:
+        # 0 = APPROVED
+        # 1 = REJECTED (rejection context already created)
+        # 2 = Kilo error / no valid output
+        if [[ $review_result -eq 2 ]]; then
+            print_status "error" "Kilo error or invalid review output"
+            ((consecutive_failures++))
+            ((iteration++))
+            
+            if [[ $consecutive_failures -ge $max_consecutive_failures ]]; then
+                print_status "error" "Circuit breaker triggered (too many Kilo errors)"
+                print_summary "$tasks_completed" "KILO_ERRORS" "$total_attempts"
+                exit 1
+            fi
+            
+            local backoff=$((2 ** consecutive_failures))
+            [[ $backoff -gt 60 ]] && backoff=60
+            echo "⏳ Waiting ${backoff}s before retry..."
+            sleep "$backoff"
+            continue
+            
+        elif [[ $review_result -eq 1 ]]; then
+            # REJECTED - rejection context already created in run_review_gate
             ((review_failures++))
             ((iteration++))
             print_status "failure" "Review failure $review_failures/$max_review_failures (iteration $iteration)"
@@ -521,41 +582,7 @@ main() {
                 exit 1
             fi
             
-            # Save rejection context
-            local last_review_log=$(tail -n 50 "$LOG_FILE" 2>/dev/null || echo "")
-            local rejection_context_file="${PROJECT_ROOT}/.ralph_rejection_context.md"
-            local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
-            
-            cat > "$rejection_context_file" << REJECTION_CTX
-# Review Rejection Context
-
-**Iteration**: $iteration
-**Timestamp**: $timestamp
-**Task ID**: $pending_task_id
-
-## ⚠️ ВАЖНО: ИСПРАВЬ ЭТУ ЖЕ ЗАДАЧУ
-
-Твоя задача $pending_task_id была отклонена на review.
-Ты ДОЛЖЕН исправить замечания и снова отправить ЕЁ ЖЕ на review.
-НЕ переходи к следующей задаче пока эта не пройдёт review.
-
-## Recent Review Log
-
-\`\`\`
-$last_review_log
-\`\`\`
-
-## Action Required
-
-1. Прочитай замечания reviewers выше
-2. Исправь проблемы в коде
-3. Создай файл $PENDING_TASKS_FILE с task_id: "$pending_task_id"
-4. НЕ начинай новые задачи пока эта не одобрена
-REJECTION_CTX
-            
             save_state "REJECTED" "$iteration" "$pending_task_id"
-            print_status "info" "Rejection context saved to: $rejection_context_file"
-            
             continue
         fi
         
