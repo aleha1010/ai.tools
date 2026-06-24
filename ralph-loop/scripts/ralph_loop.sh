@@ -2,30 +2,40 @@
 #
 # ralph_loop.sh - Ralph loop orchestrator for Kilo CLI with Review Gate
 #
-# Usage:
+# Использование:
 #   ./ralph_loop.sh --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--working-directory DIR]
 #
-# Configuration:
-#   --tasks-path PATH        Path to tasks.md (required)
-#   --max-iterations N       Maximum iterations (default: 50, range: 1-1000)
-#   --verbose                Enable verbose output
-#   --no-review              Disable review gate (for hotfixes)
-#   --working-directory DIR  Working directory
+# Конфигурация:
+#   --tasks-path PATH        Путь к tasks.md (обязательно)
+#   --max-iterations N       Максимум итераций (по умолчанию: 50, диапазон: 1-1000)
+#   --verbose                Подробный вывод
+#   --no-review              Отключить review gate (для hotfix)
+#   --working-directory DIR  Рабочая директория
 #
-# Features:
-#   - One task per iteration with mandatory review
-#   - Multi-agent review before marking task complete
-#   - Circuit breaker: stops after 3 consecutive failures
-#   - Review failure tolerance: 2 review failures before stopping
-#   - Exponential backoff on failures (max 60s)
-#   - Informative output with timestamps
+# Возможности:
+#   - Одна задача за итерацию с обязательным review
+#   - Мульти-агентное review перед отметкой задачи выполненной
+#   - Circuit breaker: остановка после 3 последовательных неудач
+#   - Tolерантность к неудачам review: 2 неудачи review до остановки
+#   - Exponential backoff при неудачах (макс 60с)
+#   - Информативный вывод с временными метками
 #
 
 set -euo pipefail
 
-#region Configuration
+#region Константы
+readonly MAX_CONSECUTIVE_FAILURES=3
+readonly MAX_REVIEW_FAILURES=2
+readonly MAX_BACKOFF_SECONDS=60
+readonly MAX_TOTAL_ATTEMPTS_MULTIPLIER=10
+readonly DEFAULT_MAX_ITERATIONS=50
+readonly MIN_ITERATIONS=1
+readonly MAX_ITERATIONS_LIMIT=1000
+#endregion
+
+#region Конфигурация
 TASKS_PATH=""
-MAX_ITERATIONS=50
+MAX_ITERATIONS=$DEFAULT_MAX_ITERATIONS
 VERBOSE=false
 NO_REVIEW=false
 WORKING_DIRECTORY=""
@@ -36,23 +46,30 @@ LOCK_FILE="/tmp/ralph_loop_${USER}.lock"
 LOG_FILE=""
 STATE_FILE=""
 PENDING_TASKS_FILE=""
+
+# DI для тестирования
+KILO_CMD="${KILO_CMD:-kilo}"
+GIT_CMD="${GIT_CMD:-git}"
+SLEEP_CMD="${SLEEP_CMD:-sleep}"
 #endregion
 
-#region Security Functions
+#region Функции безопасности
 validate_path() {
     local path="$1"
     local description="$2"
     
     if [[ ! -e "$path" ]]; then
-        echo "Error: $description not found: $path" >&2
-        exit 1
+        echo "Ошибка: $description не найден: $path" >&2
+        return 1
     fi
     
     path=$(realpath "$path")
+    local project_root_real
+    project_root_real=$(realpath "$PROJECT_ROOT")
     
-    if [[ ! "$path" =~ ^"$PROJECT_ROOT" ]]; then
-        echo "Error: Path traversal detected. $description must be within project directory" >&2
-        exit 1
+    if [[ ! "$path" =~ ^"$project_root_real" ]]; then
+        echo "Ошибка: Обнаружен path traversal. $description должен быть внутри директории проекта" >&2
+        return 1
     fi
     
     echo "$path"
@@ -65,33 +82,33 @@ validate_numeric() {
     local max="$4"
     
     if [[ ! "$value" =~ ^[0-9]+$ ]]; then
-        echo "Error: $name must be a positive integer" >&2
-        exit 1
+        echo "Ошибка: $name должен быть положительным целым числом" >&2
+        return 1
     fi
     
     if [[ $value -lt $min || $value -gt $max ]]; then
-        echo "Error: $name must be between $min and $max" >&2
-        exit 1
+        echo "Ошибка: $name должен быть между $min и $max" >&2
+        return 1
     fi
 }
 #endregion
 
-#region Parse Arguments
+#region Парсинг аргументов
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --tasks-path)
                 if [[ -z "${2:-}" ]]; then
-                    echo "Error: --tasks-path requires a value" >&2
-                    exit 1
+                    echo "Ошибка: --tasks-path требует значение" >&2
+                    return 1
                 fi
                 TASKS_PATH="$2"
                 shift 2
                 ;;
             --max-iterations)
                 if [[ -z "${2:-}" ]]; then
-                    echo "Error: --max-iterations requires a value" >&2
-                    exit 1
+                    echo "Ошибка: --max-iterations требует значение" >&2
+                    return 1
                 fi
                 MAX_ITERATIONS="$2"
                 shift 2
@@ -106,33 +123,33 @@ parse_args() {
                 ;;
             --working-directory)
                 if [[ -z "${2:-}" ]]; then
-                    echo "Error: --working-directory requires a value" >&2
-                    exit 1
+                    echo "Ошибка: --working-directory требует значение" >&2
+                    return 1
                 fi
                 WORKING_DIRECTORY="$2"
                 shift 2
                 ;;
             --help|-h)
-                echo "Usage: $0 --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--working-directory DIR]"
+                echo "Использование: $0 --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--working-directory DIR]"
                 echo ""
-                echo "Options:"
-                echo "  --tasks-path PATH        Path to tasks.md (required)"
-                echo "  --max-iterations N       Maximum iterations (default: 50)"
-                echo "  --verbose                Enable verbose output"
-                echo "  --no-review              Disable review gate"
-                echo "  --working-directory DIR  Working directory"
-                exit 0
+                echo "Параметры:"
+                echo "  --tasks-path PATH        Путь к tasks.md (обязательно)"
+                echo "  --max-iterations N       Максимум итераций (по умолчанию: 50)"
+                echo "  --verbose                Подробный вывод"
+                echo "  --no-review              Отключить review gate"
+                echo "  --working-directory DIR  Рабочая директория"
+                return 0
                 ;;
             *)
-                echo "Error: Unknown parameter: $1" >&2
-                exit 1
+                echo "Ошибка: Неизвестный параметр: $1" >&2
+                return 1
                 ;;
         esac
     done
 }
 #endregion
 
-#region Helper Functions
+#region Вспомогательные функции
 print_header() {
     local iteration=$1
     local max=$2
@@ -193,16 +210,13 @@ mark_task_completed() {
         return 1
     fi
     
-    # Mark task as completed in tasks.md (macOS and Linux compatible)
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        # macOS requires empty string after -i
         sed -i '' "s/- \[ \] ${task_id}/- [x] ${task_id}/" "$tasks_file"
     else
-        # Linux
         sed -i "s/- \[ \] ${task_id}/- [x] ${task_id}/" "$tasks_file"
     fi
     
-    print_status "success" "Task $task_id marked as completed"
+    print_status "success" "Задача $task_id помечена как выполненная"
 }
 
 print_summary() {
@@ -211,19 +225,51 @@ print_summary() {
     local total_attempts=${3:-0}
     echo ""
     echo "========================================================"
-    echo "  Ralph Loop Summary"
+    echo "  Ralph Loop — Сводка"
     echo "========================================================"
-    echo "  Tasks completed: $tasks_completed"
-    echo "  Total attempts: $total_attempts"
-    echo "  Iterations (retries): $iteration"
-    echo "  Status: $status"
-    echo "  Log file: $LOG_FILE"
-    echo "  Review enabled: $(if [[ "$NO_REVIEW" == "true" ]]; then echo "NO"; else echo "YES"; fi)"
+    echo "  Задач выполнено: $tasks_completed"
+    echo "  Всего попыток: $total_attempts"
+    echo "  Итераций (повторные попытки): $iteration"
+    echo "  Статус: $status"
+    echo "  Лог файл: $LOG_FILE"
+    echo "  Review включён: $(if [[ "$NO_REVIEW" == "true" ]]; then echo "НЕТ"; else echo "ДА"; fi)"
     echo "========================================================"
+}
+
+calculate_backoff() {
+    local failure_count=$1
+    local backoff=$((2 ** failure_count))
+    [[ $backoff -gt $MAX_BACKOFF_SECONDS ]] && backoff=$MAX_BACKOFF_SECONDS
+    echo "$backoff"
+}
+
+handle_failure() {
+    local failure_type="$1"
+    local failure_count="$2"
+    local max_failures="$3"
+    local exit_status="$4"
+    
+    ((failure_count++))
+    
+    print_status "failure" "Неудача $failure_type: $failure_count/$max_failures" >&2
+    
+    if [[ $failure_count -ge $max_failures ]]; then
+        print_status "error" "Circuit breaker сработал" >&2
+        print_summary "$tasks_completed" "$exit_status" "$total_attempts" >&2
+        echo "CIRCUIT_BREAKER"
+        return 0
+    fi
+    
+    local backoff
+    backoff=$(calculate_backoff "$failure_count")
+    echo "⏳ Ожидание ${backoff}с перед повторной попыткой..." >&2
+    $SLEEP_CMD "$backoff"
+    
+    echo "$failure_count"
 }
 #endregion
 
-#region State Management Functions
+#region Функции управления состоянием
 save_state() {
     local state="$1"
     local iteration="$2"
@@ -241,7 +287,7 @@ EOF
 }
 #endregion
 
-#region Review Gate Functions
+#region Функции Review Gate
 run_review_gate() {
     local iteration=$1
     local task_id=$2
@@ -249,63 +295,57 @@ run_review_gate() {
     local review_prompt_file="$REVIEW_PROMPT_FILE"
     
     if [[ "$NO_REVIEW" == "true" ]]; then
-        print_status "info" "Review gate disabled (--no-review)"
+        print_status "info" "Review gate отключён (--no-review)"
         return 0
     fi
     
     if [[ ! -f "$review_prompt_file" ]]; then
-        print_status "failure" "Review prompt not found: $review_prompt_file"
-        print_status "info" "Skipping review gate..."
+        print_status "failure" "Prompt для review не найден: $review_prompt_file"
+        print_status "info" "Пропуск review gate..."
         return 1
     fi
     
-    print_phase "PHASE 2: Review Gate" "Reviewing task $task_id"
+    print_phase "ФАЗА 2: Review Gate" "Проверка задачи $task_id"
     
-    # Prepare review prompt
     local PROMPT=$(sed "s|\$TASKS_PATH|$TASKS_PATH|g" "$review_prompt_file")
     PROMPT=$(sed "s|\$PENDING_TASKS_FILE|$pending_file|g" <<< "$PROMPT")
     
-    # Run review
     set +e
     local review_output
-    review_output=$(kilo run --auto "$PROMPT" 2>&1)
+    review_output=$($KILO_CMD run --auto "$PROMPT" 2>&1)
     local review_exit_code=$?
     set -e
     
-    # Check for Kilo session errors
     if echo "$review_output" | grep -q "Session not found\|Error:"; then
-        print_status "error" "Kilo error - session issue"
+        print_status "error" "Ошибка Kilo — проблема с сессией"
         echo "$review_output" | grep -E "Error:|Session not found" | head -3
-        return 2  # Special code for Kilo errors
+        return 2
     fi
     
-    # Parse decision from REVIEW RESULTS: block
     local decision=""
     decision=$(echo "$review_output" | grep -o "### Decision: APPROVED\|### Decision: REJECTED" | head -1 | sed 's/### Decision: //')
     
     if [[ "$decision" == "APPROVED" ]]; then
-        print_status "success" "Review PASSED - Task $task_id approved"
+        print_status "success" "Review ПРОЙДЕН — Задача $task_id одобрена"
         echo ""
         return 0
     elif [[ "$decision" == "REJECTED" ]]; then
-        print_status "error" "Review REJECTED - Task $task_id needs fixes"
+        print_status "error" "Review ОТКЛОНЁН — Задаче $task_id требуются исправления"
         echo ""
         
-        # Extract REVIEW RESULTS block for agent
         local review_results_block=""
         review_results_block=$(echo "$review_output" | sed -n '/^REVIEW RESULTS:/,$p')
         echo "$review_results_block" > "${PROJECT_ROOT}/.ralph_review_results.md"
-        print_status "info" "Review results saved to .ralph_review_results.md"
+        print_status "info" "Результаты review сохранены в .ralph_review_results.md"
         
-        # Create rejection context immediately (don't rely on main loop)
         local rejection_context_file="${PROJECT_ROOT}/.ralph_rejection_context.md"
         local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
         
         cat > "$rejection_context_file" << REJECTION_CTX
-# Review Rejection Context
+# Контекст отклонения Review
 
-**Timestamp**: $timestamp
-**Task ID**: $task_id
+**Время**: $timestamp
+**ID задачи**: $task_id
 
 ## ⚠️ ВАЖНО: ИСПРАВЬ ЭТУ ЖЕ ЗАДАЧУ
 
@@ -315,13 +355,13 @@ run_review_gate() {
 
 ---
 
-## Review Results
+## Результаты Review
 
 $review_results_block
 
 ---
 
-## Action Required
+## Требуемые действия
 
 1. Прочитай замечания reviewers выше
 2. Исправь проблемы в коде
@@ -329,16 +369,15 @@ $review_results_block
 4. НЕ начинай новые задачи пока эта не одобрена
 REJECTION_CTX
         
-        print_status "info" "Rejection context saved to: $rejection_context_file"
+        print_status "info" "Контекст отклонения сохранён в: $rejection_context_file"
         return 1
     else
-        # No valid decision found
         if [[ $review_exit_code -ne 0 ]]; then
-            print_status "failure" "Review failed with exit code $review_exit_code"
+            print_status "failure" "Review завершился с кодом $review_exit_code"
             return 2
         fi
         
-        print_status "failure" "No valid REVIEW RESULTS found in output"
+        print_status "failure" "Не найден валидный REVIEW RESULTS в выводе"
         return 2
     fi
 }
@@ -349,20 +388,20 @@ do_commit() {
     local iteration="$3"
     
     echo ""
-    print_phase "PHASE 3: Commit" "Creating git commit for $task_id"
+    print_phase "ФАЗА 3: Коммит" "Создание git коммита для $task_id"
     
     local commit_message="feat(${feature_name}): ${task_id}"
     
     if [[ "$NO_REVIEW" != "true" ]]; then
         commit_message="${commit_message}
 
-Review: ✅ PASSED"
+Review: ✅ ПРОЙДЕН"
     fi
     
-    git add -A
-    git commit -m "$commit_message"
+    $GIT_CMD add -A
+    $GIT_CMD commit -m "$commit_message"
     
-    print_status "success" "Committed: $commit_message"
+    print_status "success" "Закоммичено: $commit_message"
 }
 
 extract_feature_name() {
@@ -376,31 +415,36 @@ extract_feature_name() {
 #region Main
 main() {
     if ! command -v jq >/dev/null 2>&1; then
-        echo "Error: jq is required but not installed. Install with: brew install jq" >&2
+        echo "Ошибка: jq требуется, но не установлен. Установите через: brew install jq" >&2
         exit 1
     fi
     
-    if ! command -v git >/dev/null 2>&1; then
-        echo "Error: git is required but not installed" >&2
+    if ! command -v $GIT_CMD >/dev/null 2>&1; then
+        echo "Ошибка: git требуется, но не установлен" >&2
+        exit 1
+    fi
+    
+    if ! command -v $KILO_CMD >/dev/null 2>&1; then
+        echo "Ошибка: kilo требуется, но не найден в PATH" >&2
         exit 1
     fi
     
     parse_args "$@"
     
     if [[ -z "$TASKS_PATH" ]]; then
-        echo "Error: --tasks-path is required" >&2
+        echo "Ошибка: --tasks-path обязателен" >&2
         exit 1
     fi
     
-    PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    PROJECT_ROOT=$($GIT_CMD rev-parse --show-toplevel 2>/dev/null || pwd)
     PROJECT_ROOT=$(realpath "$PROJECT_ROOT")
     
-    TASKS_PATH=$(validate_path "$TASKS_PATH" "tasks.md")
+    TASKS_PATH=$(validate_path "$TASKS_PATH" "tasks.md") || exit 1
     
-    validate_numeric "$MAX_ITERATIONS" "--max-iterations" 1 1000
+    validate_numeric "$MAX_ITERATIONS" "--max-iterations" $MIN_ITERATIONS $MAX_ITERATIONS_LIMIT || exit 1
     
     if [[ -n "$WORKING_DIRECTORY" ]]; then
-        WORKING_DIRECTORY=$(validate_path "$WORKING_DIRECTORY" "working directory")
+        WORKING_DIRECTORY=$(validate_path "$WORKING_DIRECTORY" "рабочая директория") || exit 1
         cd "$WORKING_DIRECTORY"
     fi
     
@@ -415,21 +459,21 @@ main() {
     
     PROMPT_FILE="${PROJECT_ROOT}/${PROMPT_FILE}"
     if [[ ! -f "$PROMPT_FILE" ]]; then
-        echo "Error: Prompt file not found: $PROMPT_FILE" >&2
+        echo "Ошибка: Файл prompt не найден: $PROMPT_FILE" >&2
         exit 1
     fi
     
     if [[ "$NO_REVIEW" != "true" ]]; then
         REVIEW_PROMPT_FILE="${PROJECT_ROOT}/.kilo/prompts/ralph-review.md"
         if [[ ! -f "$REVIEW_PROMPT_FILE" ]]; then
-            echo "⚠️  Warning: Review prompt not found: $REVIEW_PROMPT_FILE" >&2
+            echo "⚠️  Предупреждение: Prompt для review не найден: $REVIEW_PROMPT_FILE" >&2
         fi
     fi
     
     if [[ -f "$LOCK_FILE" ]]; then
         local lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
         if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
-            echo "Error: Another instance is running (PID: $lock_pid)" >&2
+            echo "Ошибка: Другой экземпляр уже запущен (PID: $lock_pid)" >&2
             exit 1
         fi
     fi
@@ -439,33 +483,30 @@ main() {
     local FEATURE_NAME=$(extract_feature_name "$TASKS_PATH")
     
     echo "🚀 Запуск Ralph Loop..."
-    echo "Tasks: $TASKS_PATH"
-    echo "Feature: $FEATURE_NAME"
-    echo "Max iterations: $MAX_ITERATIONS"
-    echo "Review enabled: $(if [[ "$NO_REVIEW" == "true" ]]; then echo "NO"; else echo "YES"; fi)"
-    echo "Mode: ONE TASK PER ITERATION"
+    echo "Задачи: $TASKS_PATH"
+    echo "Фича: $FEATURE_NAME"
+    echo "Максимум итераций: $MAX_ITERATIONS"
+    echo "Review включён: $(if [[ "$NO_REVIEW" == "true" ]]; then echo "НЕТ"; else echo "ДА"; fi)"
+    echo "Режим: ОДНА ЗАДАЧА ЗА ИТЕРАЦИЮ"
     echo ""
     
     local iteration=0
     local tasks_completed=0
     local consecutive_failures=0
-    local max_consecutive_failures=3
     local review_failures=0
-    local max_review_failures=2
     local total_attempts=0
-    local max_total_attempts=$((MAX_ITERATIONS * 10))
+    local max_total_attempts=$((MAX_ITERATIONS * MAX_TOTAL_ATTEMPTS_MULTIPLIER))
     
     while [[ $total_attempts -lt $max_total_attempts ]]; do
         ((total_attempts++))
         print_header "$iteration" "$MAX_ITERATIONS"
         
-        # Check for remaining tasks
         local next_task=$(get_first_incomplete_task "$TASKS_PATH")
         
         if [[ -z "$next_task" ]]; then
             echo ""
             save_state "COMPLETE" "$iteration" ""
-            print_status "success" "🎉 All tasks complete!"
+            print_status "success" "🎉 Все задачи выполнены!"
             print_summary "$tasks_completed" "COMPLETE" "$total_attempts"
             exit 0
         fi
@@ -473,10 +514,10 @@ main() {
         rm -f "$PENDING_TASKS_FILE"
         
         # =====================================================
-        # PHASE 1: Implementation (ONE TASK)
+        # ФАЗА 1: Реализация (ОДНА ЗАДАЧА)
         # =====================================================
         
-        print_phase "PHASE 1: Implementation" "Working on task $next_task"
+        print_phase "ФАЗА 1: Реализация" "Работа над задачей $next_task"
         save_state "IMPLEMENTING" "$iteration" "$next_task"
         
         local PROMPT=$(sed "s|\$TASKS_PATH|$TASKS_PATH|g" "$PROMPT_FILE")
@@ -484,35 +525,30 @@ main() {
         PROMPT=$(printf '%s' "$PROMPT")
         
         set +e
-        kilo run --auto "$PROMPT"
+        $KILO_CMD run --auto "$PROMPT"
         local exit_code=$?
         set -e
         
         if [[ $exit_code -ne 0 ]]; then
             save_state "FAILED" "$iteration" "$next_task"
-            ((consecutive_failures++))
             ((iteration++))
             
-            print_status "error" "Iteration $iteration: implementation failed for task $next_task"
+            print_status "error" "Итерация $iteration: реализация не удалась для задачи $next_task"
             
-            print_status "failure" "Implementation failure $consecutive_failures/$max_consecutive_failures"
+            local failure_result
+            failure_result=$(handle_failure "реализации" "$consecutive_failures" "$MAX_CONSECUTIVE_FAILURES" "CIRCUIT_BREAKER")
             
-            if [[ $consecutive_failures -ge $max_consecutive_failures ]]; then
-                print_status "error" "Circuit breaker triggered"
-                print_summary "$tasks_completed" "CIRCUIT_BREAKER" "$total_attempts"
+            if [[ "$failure_result" == "CIRCUIT_BREAKER" ]]; then
                 exit 1
             fi
             
+            consecutive_failures="$failure_result"
+            
             if [[ $iteration -ge $MAX_ITERATIONS ]]; then
-                print_status "error" "Max iterations reached"
+                print_status "error" "Достигнут максимум итераций"
                 print_summary "$tasks_completed" "MAX_ITERATIONS_REACHED" "$total_attempts"
                 exit 1
             fi
-            
-            local backoff=$((2 ** consecutive_failures))
-            [[ $backoff -gt 60 ]] && backoff=60
-            echo "⏳ Waiting ${backoff}s before retry..."
-            sleep "$backoff"
             
             continue
         fi
@@ -520,22 +556,22 @@ main() {
         consecutive_failures=0
         
         # =====================================================
-        # PHASE 2: Review Gate
+        # ФАЗА 2: Review Gate
         # =====================================================
         
         if [[ ! -f "$PENDING_TASKS_FILE" ]]; then
-            print_status "info" "No pending task file created - task may already be complete or agent had nothing to do"
+            print_status "info" "Файл pending task не создан — задача может быть уже выполнена или агенту нечего было делать"
             continue
         fi
         
         local pending_task_id=$(jq -r '.task_id' "$PENDING_TASKS_FILE" 2>/dev/null || echo "")
         
         if [[ -z "$pending_task_id" ]]; then
-            print_status "failure" "Invalid pending tasks file"
+            print_status "failure" "Некорректный файл pending tasks"
             continue
         fi
         
-        print_status "info" "Task $pending_task_id ready for review"
+        print_status "info" "Задача $pending_task_id готова к review"
         save_state "REVIEWING" "$iteration" "$pending_task_id"
         
         set +e
@@ -543,41 +579,33 @@ main() {
         local review_result=$?
         set -e
         
-        # Handle different return codes:
-        # 0 = APPROVED
-        # 1 = REJECTED (rejection context already created)
-        # 2 = Kilo error / no valid output
         if [[ $review_result -eq 2 ]]; then
-            print_status "error" "Kilo error or invalid review output"
-            ((consecutive_failures++))
+            print_status "error" "Ошибка Kilo или некорректный вывод review"
             ((iteration++))
             
-            if [[ $consecutive_failures -ge $max_consecutive_failures ]]; then
-                print_status "error" "Circuit breaker triggered (too many Kilo errors)"
-                print_summary "$tasks_completed" "KILO_ERRORS" "$total_attempts"
+            local failure_result
+            failure_result=$(handle_failure "Kilo ошибки" "$consecutive_failures" "$MAX_CONSECUTIVE_FAILURES" "KILO_ERRORS")
+            
+            if [[ "$failure_result" == "CIRCUIT_BREAKER" ]]; then
                 exit 1
             fi
             
-            local backoff=$((2 ** consecutive_failures))
-            [[ $backoff -gt 60 ]] && backoff=60
-            echo "⏳ Waiting ${backoff}s before retry..."
-            sleep "$backoff"
+            consecutive_failures="$failure_result"
             continue
             
         elif [[ $review_result -eq 1 ]]; then
-            # REJECTED - rejection context already created in run_review_gate
             ((review_failures++))
             ((iteration++))
-            print_status "failure" "Review failure $review_failures/$max_review_failures (iteration $iteration)"
+            print_status "failure" "Неудача review $review_failures/$MAX_REVIEW_FAILURES (итерация $iteration)"
             
-            if [[ $review_failures -ge $max_review_failures ]]; then
-                print_status "error" "Too many review failures"
+            if [[ $review_failures -ge $MAX_REVIEW_FAILURES ]]; then
+                print_status "error" "Слишком много неудач review"
                 print_summary "$tasks_completed" "REVIEW_FAILURES" "$total_attempts"
                 exit 1
             fi
             
             if [[ $iteration -ge $MAX_ITERATIONS ]]; then
-                print_status "error" "Max iterations reached"
+                print_status "error" "Достигнут максимум итераций"
                 print_summary "$tasks_completed" "MAX_ITERATIONS_REACHED" "$total_attempts"
                 exit 1
             fi
@@ -587,7 +615,7 @@ main() {
         fi
         
         # =====================================================
-        # PHASE 3: Mark complete & Commit
+        # ФАЗА 3: Пометить выполненной и закоммитить
         # =====================================================
         
         review_failures=0
@@ -604,10 +632,10 @@ main() {
         
         if [[ "$VERBOSE" == "true" ]]; then
             local remaining=$(get_incomplete_task_count "$TASKS_PATH")
-            print_status "info" "Remaining tasks: $remaining"
+            print_status "info" "Осталось задач: $remaining"
         fi
         
-        sleep 1
+        $SLEEP_CMD 1
     done
     
     print_summary "$tasks_completed" "MAX_ATTEMPTS_REACHED" "$total_attempts"
