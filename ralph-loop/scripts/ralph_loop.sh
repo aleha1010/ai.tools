@@ -281,7 +281,7 @@ get_incomplete_task_count() {
 
 get_first_incomplete_task() {
     local tasks_file="$1"
-    grep -m 1 "^\s*-\s*\[ \]" "$tasks_file" 2>/dev/null | grep -oE 'T[0-9]+' | head -1 || echo ""
+    grep -m 1 "^\s*-\s*\[ \]" "$tasks_file" 2>/dev/null | grep -oE '[A-Z]+-[0-9]+|T[0-9]+' | head -1 || echo ""
 }
 
 get_next_executable_task() {
@@ -290,13 +290,8 @@ get_next_executable_task() {
     local status_cache="$3"
     
     while IFS= read -r line; do
-        if echo "$line" | grep -qE '^\s*-\s*\[ \]\s+T[0-9]+'; then
-            local task_id=$(echo "$line" | grep -oE 'T[0-9]+' | head -1)
-            
-            if [[ ! "$task_id" =~ ^T[0-9]+$ ]]; then
-                print_status "failure" "Некорректный формат task_id: $task_id"
-                continue
-            fi
+        if echo "$line" | grep -qE '^\s*-\s*\[ \]\s+[A-Z0-9-]+'; then
+            local task_id=$(echo "$line" | grep -oE '[A-Z]+-[0-9]+|T[0-9]+' | head -1)
             
             local task_file="$tasks_dir/${task_id}.md"
             local frontmatter_cache="/tmp/.frontmatter_${task_id}_$$"
@@ -675,11 +670,13 @@ main() {
             TASK_FILE_PATH="$TASKS_PATH"
         fi
         
-        local safe_task_path=$(printf '%s' "$TASK_FILE_PATH" | sed 's/[&/\]/\\&/g')
-        local safe_pending_path=$(printf '%s' "$PENDING_TASKS_FILE" | sed 's/[&/\]/\\&/g')
-        
+        local safe_task_path=$(printf '%q' "$TASK_FILE_PATH")
+        local safe_pending_path=$(printf '%q' "$PENDING_TASKS_FILE")
+        local safe_feature_dir=$(printf '%q' "$FEATURE_DIR")
+
         local PROMPT=$(sed "s|\$TASKS_PATH|$safe_task_path|g" "$PROMPT_FILE")
         PROMPT=$(sed "s|\$PENDING_TASKS_FILE|$safe_pending_path|g" <<< "$PROMPT")
+        PROMPT=$(sed "s|\$FEATURE_DIR|$safe_feature_dir|g" <<< "$PROMPT")
         PROMPT=$(printf '%s' "$PROMPT")
         
         set +e
@@ -688,6 +685,15 @@ main() {
         set -e
         
         local escalation_file="${FEATURE_DIR}/.escalation_handoff.md"
+        local escalation_file_alt="${PROJECT_ROOT}/.escalation_handoff.md"
+
+        # Standard location: feature directory
+        # Fallback: project root (for backward compatibility)
+        if [[ -f "$escalation_file_alt" ]] && [[ ! -f "$escalation_file" ]]; then
+            print_status "warning" "Escalation file in project root. Standard location: ${FEATURE_DIR}/.escalation_handoff.md"
+            escalation_file="$escalation_file_alt"
+        fi
+
         if [[ -f "$escalation_file" ]]; then
             save_state "ESCALATION" "$iteration" "$next_task"
             

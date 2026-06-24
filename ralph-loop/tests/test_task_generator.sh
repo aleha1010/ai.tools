@@ -55,9 +55,9 @@ extract_tasks_from_plan() {
     local tasks_dir="$2"
     local tasks_file="$3"
     
-    grep -E '^###\s+T[0-9]+:' "$plan_file" | while IFS= read -r line; do
-        local task_id=$(echo "$line" | grep -oE 'T[0-9]+')
-        local task_title=$(echo "$line" | sed 's/### T[0-9]*: //')
+    grep -E '^###\s+[A-Z0-9-]+:' "$plan_file" | while IFS= read -r line; do
+        local task_id=$(echo "$line" | grep -oE '[A-Z]+-[0-9]+|T[0-9]+')
+        local task_title=$(echo "$line" | sed -E 's/### [A-Z0-9-]+: //')
         echo "- [ ] ${task_id}: ${task_title}"
     done > "$tasks_file"
 }
@@ -108,7 +108,7 @@ EOF
     if grep -q "\- \[ \] T001: First task" "$tasks_file" && grep -q "\- \[ \] T002: Second task" "$tasks_file"; then
         return 0
     else
-        echo "tasks.md should contain correct task format" >&2
+        echo "Mixed ID formats should be supported" >&2
         cat "$tasks_file" >&2
         return 1
     fi
@@ -137,6 +137,37 @@ EOF
     fi
 }
 
+test_extract_tasks_supports_mixed_ids() {
+    cat > features/001-auth/plan.md << 'EOF'
+### AUTH-001: Setup authentication
+Description
+
+### FIX-042: Fix login bug
+Description
+
+### HOTFIX-007: Critical patch
+Description
+
+### T001: Regular task
+Description
+EOF
+    
+    local tasks_file="features/001-auth/tasks.md"
+    
+    extract_tasks_from_plan "features/001-auth/plan.md" "features/001-auth/tasks" "$tasks_file"
+    
+    if grep -q "AUTH-001: Setup authentication" "$tasks_file" && \
+       grep -q "FIX-042: Fix login bug" "$tasks_file" && \
+       grep -q "HOTFIX-007: Critical patch" "$tasks_file" && \
+       grep -q "T001: Regular task" "$tasks_file"; then
+        return 0
+    else
+        echo "Order should be preserved" >&2
+        cat "$tasks_file" >&2
+        return 1
+    fi
+}
+
 # =====================================================
 # MAIN
 # =====================================================
@@ -150,6 +181,7 @@ main() {
     run_test "extract_tasks creates tasks.md" test_extract_tasks_creates_tasks_file
     run_test "extract_tasks correct format" test_extract_tasks_correct_format
     run_test "extract_tasks preserves order" test_extract_tasks_preserves_order
+    run_test "extract_tasks supports mixed IDs" test_extract_tasks_supports_mixed_ids
     
     echo ""
     echo "========================================"

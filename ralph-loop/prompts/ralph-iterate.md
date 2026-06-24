@@ -42,9 +42,9 @@ This file means: "I finished programming this task, ready for review".
 
 Если обнаружена проблема, не описанная в задаче:
 
-1. Создай файл `.escalation_handoff.md` в директории фичи с содержимым:
-
-```markdown
+1. Создай файл `.escalation_handoff.md` в директории фичи:
+```bash
+cat > ${FEATURE_DIR}/.escalation_handoff.md << 'EOF'
 # Escalation Handoff
 
 **Task ID:** TXXX
@@ -76,6 +76,7 @@ This file means: "I finished programming this task, ready for review".
 
 - [ ] Создать fix-задачи для T001
 - [ ] Обновить dependencies для T002
+EOF
 ```
 
 2. НЕ создавай $PENDING_TASKS_FILE
