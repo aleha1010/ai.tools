@@ -664,6 +664,27 @@ main() {
     if [[ $TESTS_FAILED -gt 0 ]]; then
         exit 1
     fi
+    
+    echo ""
+    echo "Running additional test suites..."
+    echo ""
+    
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    
+    if [[ -f "$script_dir/test_parse_frontmatter.sh" ]]; then
+        bash "$script_dir/test_parse_frontmatter.sh" || exit 1
+    fi
+    
+    if [[ -f "$script_dir/test_get_next_task.sh" ]]; then
+        bash "$script_dir/test_get_next_task.sh" || exit 1
+    fi
+    
+    if [[ -f "$script_dir/test_integration.sh" ]]; then
+        bash "$script_dir/test_integration.sh" || exit 1
+    fi
+    
+    echo ""
+    echo "All test suites passed!"
 }
 
 main "$@"

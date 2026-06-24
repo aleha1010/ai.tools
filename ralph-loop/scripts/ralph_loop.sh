@@ -46,11 +46,93 @@ LOCK_FILE="/tmp/ralph_loop_${USER}.lock"
 LOG_FILE=""
 STATE_FILE=""
 PENDING_TASKS_FILE=""
+STATUS_CACHE_FILE=""
+FRONTMATTER_CACHE_FILE=""
 
 # DI для тестирования
 KILO_CMD="${KILO_CMD:-kilo}"
 GIT_CMD="${GIT_CMD:-git}"
 SLEEP_CMD="${SLEEP_CMD:-sleep}"
+#endregion
+
+#region Функции для работы с dependencies
+build_task_status_cache() {
+    local tasks_file="$1"
+    local cache_file="$2"
+    
+    > "$cache_file"
+    
+    while IFS= read -r line; do
+        if echo "$line" | grep -qE '^\s*-\s*\[([x ])\]\s+T[0-9]+'; then
+            local task_id=$(echo "$line" | grep -oE 'T[0-9]+' | head -1)
+            local bracket=$(echo "$line" | grep -oE '\[([x ])\]')
+            local task_status=$(echo "$bracket" | sed 's/\[\(.\)\]/\1/')
+            echo "${task_id}=${task_status}" >> "$cache_file"
+        fi
+    done < "$tasks_file"
+}
+
+get_task_status() {
+    local task_id="$1"
+    local cache_file="$2"
+    
+    grep "^${task_id}=" "$cache_file" 2>/dev/null | cut -d'=' -f2 || echo ""
+}
+
+parse_frontmatter_cached() {
+    local task_file="$1"
+    local cache_file="$2"
+    
+    if [[ -f "$cache_file" ]]; then
+        cat "$cache_file"
+        return
+    fi
+    
+    local deps=""
+    if [[ -f "$task_file" ]]; then
+        deps=$(grep '^dependencies:' "$task_file" 2>/dev/null | sed -n 's/^dependencies: \[\(.*\)\]/\1/p' | tr -d ' ' | tr ',' '\n' | grep -E '^T[0-9]+$' || echo "")
+    fi
+    
+    echo "$deps" > "$cache_file"
+    echo "$deps"
+}
+
+check_dependencies() {
+    local task_file="$1"
+    local status_cache="$2"
+    local frontmatter_cache="$3"
+    
+    local deps
+    deps=$(parse_frontmatter_cached "$task_file" "$frontmatter_cache")
+    
+    [[ -z "$deps" ]] && return 0
+    
+    for dep in $deps; do
+        if [[ "$(get_task_status "$dep" "$status_cache")" != "x" ]]; then
+            return 1
+        fi
+    done
+    
+    return 0
+}
+
+validate_tasks_integrity() {
+    local tasks_file="$1"
+    local tasks_dir="$2"
+    local errors=0
+    
+    while IFS= read -r line; do
+        if [[ $line =~ ^-\ \[\ \]\ .*(T[0-9]+) ]]; then
+            local task_id="${BASH_REMATCH[1]}"
+            if [[ ! -f "$tasks_dir/${task_id}.md" ]]; then
+                echo "ERROR: Missing task file for $task_id" >&2
+                ((errors++))
+            fi
+        fi
+    done < "$tasks_file"
+    
+    return $errors
+}
 #endregion
 
 #region Функции безопасности
@@ -199,7 +281,42 @@ get_incomplete_task_count() {
 
 get_first_incomplete_task() {
     local tasks_file="$1"
-    grep -m 1 "^\s*-\s*\[ \]" "$tasks_file" 2>/dev/null | grep -oE 'T[0-9]+' || echo ""
+    grep -m 1 "^\s*-\s*\[ \]" "$tasks_file" 2>/dev/null | grep -oE 'T[0-9]+' | head -1 || echo ""
+}
+
+get_next_executable_task() {
+    local tasks_file="$1"
+    local tasks_dir="$2"
+    local status_cache="$3"
+    
+    while IFS= read -r line; do
+        if echo "$line" | grep -qE '^\s*-\s*\[ \]\s+T[0-9]+'; then
+            local task_id=$(echo "$line" | grep -oE 'T[0-9]+' | head -1)
+            
+            if [[ ! "$task_id" =~ ^T[0-9]+$ ]]; then
+                print_status "failure" "Некорректный формат task_id: $task_id"
+                continue
+            fi
+            
+            local task_file="$tasks_dir/${task_id}.md"
+            local frontmatter_cache="/tmp/.frontmatter_${task_id}_$$"
+            
+            if [[ ! -f "$task_file" ]]; then
+                print_status "failure" "Файл задачи не найден: $task_file"
+                continue
+            fi
+            
+            if check_dependencies "$task_file" "$status_cache" "$frontmatter_cache"; then
+                rm -f "$frontmatter_cache"
+                echo "$task_id"
+                return 0
+            fi
+            
+            rm -f "$frontmatter_cache"
+        fi
+    done < "$tasks_file"
+    
+    echo ""
 }
 
 mark_task_completed() {
@@ -307,8 +424,11 @@ run_review_gate() {
     
     print_phase "ФАЗА 2: Review Gate" "Проверка задачи $task_id"
     
-    local PROMPT=$(sed "s|\$TASKS_PATH|$TASKS_PATH|g" "$review_prompt_file")
-    PROMPT=$(sed "s|\$PENDING_TASKS_FILE|$pending_file|g" <<< "$PROMPT")
+    local safe_tasks_path=$(printf '%s' "$TASKS_PATH" | sed 's/[&/\]/\\&/g')
+    local safe_pending_file=$(printf '%s' "$pending_file" | sed 's/[&/\]/\\&/g')
+    
+    local PROMPT=$(sed "s|\$TASKS_PATH|$safe_tasks_path|g" "$review_prompt_file")
+    PROMPT=$(sed "s|\$PENDING_TASKS_FILE|$safe_pending_file|g" <<< "$PROMPT")
     
     set +e
     local review_output
@@ -390,7 +510,8 @@ do_commit() {
     echo ""
     print_phase "ФАЗА 3: Коммит" "Создание git коммита для $task_id"
     
-    local commit_message="feat(${feature_name}): ${task_id}"
+    local safe_feature_name=$(printf '%s' "$feature_name" | sed 's/[^a-zA-Z0-9_-]/_/g')
+    local commit_message="feat(${safe_feature_name}): ${task_id}"
     
     if [[ "$NO_REVIEW" != "true" ]]; then
         commit_message="${commit_message}
@@ -451,6 +572,8 @@ main() {
     LOG_FILE="${PROJECT_ROOT}/.ralph_loop.log"
     STATE_FILE="${PROJECT_ROOT}/.ralph_state.json"
     PENDING_TASKS_FILE="${PROJECT_ROOT}/.ralph_pending_tasks.json"
+    STATUS_CACHE_FILE="${PROJECT_ROOT}/.ralph_status_cache"
+    FRONTMATTER_CACHE_FILE="${PROJECT_ROOT}/.ralph_frontmatter_cache"
     
     touch "$LOG_FILE" && chmod 600 "$LOG_FILE"
     touch "$STATE_FILE" && chmod 600 "$STATE_FILE"
@@ -481,6 +604,13 @@ main() {
     trap 'rm -f "$LOCK_FILE"' EXIT
     
     local FEATURE_NAME=$(extract_feature_name "$TASKS_PATH")
+    local FEATURE_DIR=$(dirname "$TASKS_PATH")
+    local TASKS_DIR="${FEATURE_DIR}/tasks"
+    
+    if [[ ! -d "$TASKS_DIR" ]]; then
+        echo "⚠️  Предупреждение: Директория tasks не найдена: $TASKS_DIR (используется старый формат)" >&2
+        TASKS_DIR=""
+    fi
     
     echo "🚀 Запуск Ralph Loop..."
     echo "Задачи: $TASKS_PATH"
@@ -497,11 +627,29 @@ main() {
     local total_attempts=0
     local max_total_attempts=$((MAX_ITERATIONS * MAX_TOTAL_ATTEMPTS_MULTIPLIER))
     
+    build_task_status_cache "$TASKS_PATH" "$STATUS_CACHE_FILE"
+    
     while [[ $total_attempts -lt $max_total_attempts ]]; do
         ((total_attempts++))
         print_header "$iteration" "$MAX_ITERATIONS"
         
-        local next_task=$(get_first_incomplete_task "$TASKS_PATH")
+        local next_task=""
+        
+        if [[ -d "$TASKS_DIR" ]]; then
+            next_task=$(get_next_executable_task "$TASKS_PATH" "$TASKS_DIR" "$STATUS_CACHE_FILE")
+            
+            if [[ -z "$next_task" ]]; then
+                local incomplete=$(get_incomplete_task_count "$TASKS_PATH")
+                if [[ $incomplete -gt 0 ]]; then
+                    print_status "error" "Все оставшиеся задачи заблокированы невыполненными dependencies"
+                    print_status "info" "Невыполненных задач: $incomplete"
+                    print_summary "$tasks_completed" "ALL_BLOCKED" "$total_attempts"
+                    exit 1
+                fi
+            fi
+        else
+            next_task=$(get_first_incomplete_task "$TASKS_PATH")
+        fi
         
         if [[ -z "$next_task" ]]; then
             echo ""
@@ -520,14 +668,46 @@ main() {
         print_phase "ФАЗА 1: Реализация" "Работа над задачей $next_task"
         save_state "IMPLEMENTING" "$iteration" "$next_task"
         
-        local PROMPT=$(sed "s|\$TASKS_PATH|$TASKS_PATH|g" "$PROMPT_FILE")
-        PROMPT=$(sed "s|\$PENDING_TASKS_FILE|$PENDING_TASKS_FILE|g" <<< "$PROMPT")
+        local TASK_FILE_PATH=""
+        if [[ -d "$TASKS_DIR" ]]; then
+            TASK_FILE_PATH="$TASKS_DIR/${next_task}.md"
+        else
+            TASK_FILE_PATH="$TASKS_PATH"
+        fi
+        
+        local safe_task_path=$(printf '%s' "$TASK_FILE_PATH" | sed 's/[&/\]/\\&/g')
+        local safe_pending_path=$(printf '%s' "$PENDING_TASKS_FILE" | sed 's/[&/\]/\\&/g')
+        
+        local PROMPT=$(sed "s|\$TASKS_PATH|$safe_task_path|g" "$PROMPT_FILE")
+        PROMPT=$(sed "s|\$PENDING_TASKS_FILE|$safe_pending_path|g" <<< "$PROMPT")
         PROMPT=$(printf '%s' "$PROMPT")
         
         set +e
         $KILO_CMD run --auto "$PROMPT"
         local exit_code=$?
         set -e
+        
+        local escalation_file="${FEATURE_DIR}/.escalation_handoff.md"
+        if [[ -f "$escalation_file" ]]; then
+            save_state "ESCALATION" "$iteration" "$next_task"
+            
+            echo ""
+            echo "⚠️  ESCALATION DETECTED"
+            echo ""
+            echo "Task $next_task requires clarification."
+            echo ""
+            echo "Handoff document: $escalation_file"
+            echo ""
+            echo "NEXT STEPS:"
+            echo "1. Review $escalation_file"
+            echo "2. Run: kilo run \"Analyze escalation and create fix-tasks for $FEATURE_DIR\""
+            echo "3. Review .proposed_fix_tasks.md and confirm"
+            echo "4. Re-run: ./ralph_loop.sh --tasks-path $TASKS_PATH"
+            echo ""
+            
+            print_summary "$tasks_completed" "ESCALATION" "$total_attempts"
+            exit 2
+        fi
         
         if [[ $exit_code -ne 0 ]]; then
             save_state "FAILED" "$iteration" "$next_task"
@@ -561,6 +741,11 @@ main() {
         
         if [[ ! -f "$PENDING_TASKS_FILE" ]]; then
             print_status "info" "Файл pending task не создан — задача может быть уже выполнена или агенту нечего было делать"
+            continue
+        fi
+        
+        if ! jq -e . "$PENDING_TASKS_FILE" >/dev/null 2>&1; then
+            print_status "error" "Некорректный JSON в файле pending tasks"
             continue
         fi
         
@@ -622,11 +807,15 @@ main() {
         save_state "COMMITTING" "$iteration" "$pending_task_id"
         
         mark_task_completed "$TASKS_PATH" "$pending_task_id"
+        
+        build_task_status_cache "$TASKS_PATH" "$STATUS_CACHE_FILE"
+        
         do_commit "$FEATURE_NAME" "$pending_task_id" "$iteration"
         ((tasks_completed++))
         
         rm -f "$PENDING_TASKS_FILE"
         rm -f "${PROJECT_ROOT}/.ralph_rejection_context.md"
+        rm -f "$FRONTMATTER_CACHE_FILE"
         
         save_state "IDLE" "$iteration" ""
         
