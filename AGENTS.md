@@ -103,3 +103,27 @@ Uses DI via env vars: `KILO_CMD`, `GIT_CMD`, `SLEEP_CMD`.
 - Agents defined with YAML frontmatter (description, mode, permissions)
 - Review skills use severity: HIGH (blocking), MEDIUM, LOW
 - All review verdicts: `APPROVED`, `CONDITIONALLY_APPROVED`, `REJECTED`
+
+## Prohibited Actions
+
+**СТРОГО ЗАПРЕЩЕНО:**
+
+- **`git reset --hard`** — Откат коммитов. Уничтожает работу и историю.
+- **`git revert`** — Отмена коммитов. Создаёт новые коммиты для отмены предыдущих.
+- **`git rebase -i`** — Интерактивный rebase. Переписывает историю.
+- **`git push --force`** — Принудительный push. Уничтожает удалённую историю.
+- **`rm -rf .git`** — Удаление git репозитория.
+- **Удаление веток без подтверждения** — `git branch -D`.
+
+**Разрешённые git операции:**
+
+- `git status`, `git log`, `git diff`, `git show` — чтение
+- `git add`, `git commit`, `git push` — стандартный workflow
+- `git branch`, `git checkout`, `git switch` — работа с ветками
+- `git stash`, `git stash pop` — временное сохранение
+
+**При необходимости отката:**
+
+1. Создать revert commit вручную с исправлениями
+2. Создать новую ветку с fix
+3. Обратиться к пользователю за решением

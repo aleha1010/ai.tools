@@ -502,7 +502,6 @@ test_print_status_error() {
 # =====================================================
 
 test_circuit_breaker_stops_after_three_failures() {
-    # Создаём mock для kilo
     local mock_kilo="$TEST_TMP_DIR/mock_kilo.sh"
     cat > "$mock_kilo" << 'EOF'
 #!/bin/bash
@@ -511,19 +510,16 @@ EOF
     chmod +x "$mock_kilo"
     
     export KILO_CMD="$mock_kilo"
-    export RALPH_TEST_MODE="true"
-    
-    local output
-    local exit_code
     
     cd "$TEST_TMP_DIR"
     
     set +e
+    local output
     output=$(bash "$RALPH_LOOP_SCRIPT" --tasks-path "$TEST_TMP_DIR/specs/001-test/tasks.md" --max-iterations 10 2>&1)
-    exit_code=$?
+    local exit_code=$?
     set -e
     
-    if [[ "$exit_code" -eq 1 ]] && [[ "$output" == *"Circuit breaker"* ]]; then
+    if [[ "$exit_code" -eq 1 ]] && [[ "$output" == *"Circuit breaker"* || "$output" == *"CIRCUIT_BREAKER"* ]]; then
         return 0
     else
         echo "Circuit breaker should stop after 3 failures. Exit: $exit_code" >&2
@@ -681,6 +677,10 @@ main() {
     
     if [[ -f "$script_dir/test_integration.sh" ]]; then
         bash "$script_dir/test_integration.sh" || exit 1
+    fi
+    
+    if [[ -f "$script_dir/test_new_functions.sh" ]]; then
+        bash "$script_dir/test_new_functions.sh" || exit 1
     fi
     
     echo ""

@@ -3,13 +3,14 @@
 # ralph_loop.sh - Ralph loop orchestrator for Kilo CLI with Review Gate
 #
 # Использование:
-#   ./ralph_loop.sh --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--working-directory DIR]
+#   ./ralph_loop.sh --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--no-commit] [--working-directory DIR]
 #
 # Конфигурация:
 #   --tasks-path PATH        Путь к tasks.md (обязательно)
 #   --max-iterations N       Максимум итераций (по умолчанию: 50, диапазон: 1-1000)
 #   --verbose                Подробный вывод
 #   --no-review              Отключить review gate (для hotfix)
+#   --no-commit              Отключить git commit (для тестирования)
 #   --working-directory DIR  Рабочая директория
 #
 # Возможности:
@@ -38,6 +39,7 @@ TASKS_PATH=""
 MAX_ITERATIONS=$DEFAULT_MAX_ITERATIONS
 VERBOSE=false
 NO_REVIEW=false
+NO_COMMIT=false
 WORKING_DIRECTORY=""
 PROJECT_ROOT=""
 PROMPT_FILE=".kilo/prompts/ralph-iterate.md"
@@ -48,6 +50,7 @@ STATE_FILE=""
 PENDING_TASKS_FILE=""
 STATUS_CACHE_FILE=""
 FRONTMATTER_CACHE_FILE=""
+REVIEW_RESULT_FILE=""
 
 # DI для тестирования
 KILO_CMD="${KILO_CMD:-kilo}"
@@ -95,6 +98,19 @@ parse_frontmatter_cached() {
     
     echo "$deps" > "$cache_file"
     echo "$deps"
+}
+
+atomic_write() {
+    local file="$1"
+    local content="$2"
+    local tmp_file="${file}.tmp.$$"
+    
+    if printf '%s\n' "$content" > "$tmp_file" && mv "$tmp_file" "$file"; then
+        return 0
+    else
+        rm -f "$tmp_file" 2>/dev/null
+        return 1
+    fi
 }
 
 check_dependencies() {
@@ -173,6 +189,22 @@ validate_numeric() {
         return 1
     fi
 }
+
+parse_frontmatter_decision() {
+    local file="$1"
+    
+    if [[ ! -f "$file" ]]; then
+        echo ""
+        return 1
+    fi
+    
+    sed -n '/^---$/,/^---$/p' "$file" 2>/dev/null | \
+        sed '1d;$d' | \
+        grep "^decision:" | \
+        head -1 | \
+        cut -d: -f2 | \
+        tr -d ' "'
+}
 #endregion
 
 #region Парсинг аргументов
@@ -203,6 +235,10 @@ parse_args() {
                 NO_REVIEW=true
                 shift
                 ;;
+            --no-commit)
+                NO_COMMIT=true
+                shift
+                ;;
             --working-directory)
                 if [[ -z "${2:-}" ]]; then
                     echo "Ошибка: --working-directory требует значение" >&2
@@ -212,13 +248,14 @@ parse_args() {
                 shift 2
                 ;;
             --help|-h)
-                echo "Использование: $0 --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--working-directory DIR]"
+                echo "Использование: $0 --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--no-commit] [--working-directory DIR]"
                 echo ""
                 echo "Параметры:"
                 echo "  --tasks-path PATH        Путь к tasks.md (обязательно)"
                 echo "  --max-iterations N       Максимум итераций (по умолчанию: 50)"
                 echo "  --verbose                Подробный вывод"
                 echo "  --no-review              Отключить review gate"
+                echo "  --no-commit              Отключить git commit"
                 echo "  --working-directory DIR  Рабочая директория"
                 return 0
                 ;;
@@ -387,15 +424,18 @@ save_state() {
     local iteration="$2"
     local current_task="$3"
     
-    cat > "$STATE_FILE" << EOF
+    cat > "$STATE_FILE" << STATE_JSON
 {
   "state": "$state",
   "iteration": $iteration,
   "current_task": "$current_task",
   "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-  "pid": $$
+  "pid": $$,
+  "review_retries": ${review_retries:-0},
+  "failed_tasks": $(echo "${failed_tasks:-[]}" | jq -c . 2>/dev/null || echo "[]"),
+  "consecutive_failures": ${consecutive_failures:-0}
 }
-EOF
+STATE_JSON
 }
 #endregion
 
@@ -404,97 +444,108 @@ run_review_gate() {
     local iteration=$1
     local task_id=$2
     local pending_file=$3
-    local review_prompt_file="$REVIEW_PROMPT_FILE"
     
     if [[ "$NO_REVIEW" == "true" ]]; then
         print_status "info" "Review gate отключён (--no-review)"
         return 0
     fi
     
-    if [[ ! -f "$review_prompt_file" ]]; then
-        print_status "failure" "Prompt для review не найден: $review_prompt_file"
-        print_status "info" "Пропуск review gate..."
-        return 1
-    fi
-    
     print_phase "ФАЗА 2: Review Gate" "Проверка задачи $task_id"
+    
+    rm -f "$REVIEW_RESULT_FILE"
     
     local safe_tasks_path=$(printf '%s' "$TASKS_PATH" | sed 's/[&/\]/\\&/g')
     local safe_pending_file=$(printf '%s' "$pending_file" | sed 's/[&/\]/\\&/g')
+    local safe_review_result=$(printf '%s' "$REVIEW_RESULT_FILE" | sed 's/[&/\]/\\&/g')
     
-    local PROMPT=$(sed "s|\$TASKS_PATH|$safe_tasks_path|g" "$review_prompt_file")
+    local PROMPT=$(sed "s|\$TASKS_PATH|$safe_tasks_path|g" "$REVIEW_PROMPT_FILE")
     PROMPT=$(sed "s|\$PENDING_TASKS_FILE|$safe_pending_file|g" <<< "$PROMPT")
+    PROMPT=$(sed "s|\$REVIEW_RESULT_FILE|$safe_review_result|g" <<< "$PROMPT")
     
     set +e
-    local review_output
-    review_output=$($KILO_CMD run --auto "$PROMPT" 2>&1)
-    local review_exit_code=$?
+    $KILO_CMD run --auto "$PROMPT"
+    local exit_code=$?
     set -e
     
-    if echo "$review_output" | grep -q "Session not found\|Error:"; then
-        print_status "error" "Ошибка Kilo — проблема с сессией"
-        echo "$review_output" | grep -E "Error:|Session not found" | head -3
-        return 2
+    if [[ ! -f "$REVIEW_RESULT_FILE" ]]; then
+        ((review_retries++))
+        
+        if [[ $review_retries -ge 2 ]]; then
+            print_status "error" "Review failed after $review_retries retries"
+            mark_task_failed "$task_id"
+            create_escalation_for_review_failure "$task_id"
+            return 2
+        fi
+        
+        print_status "warning" "Review result not found, retrying ($review_retries/2)"
+        return 1
     fi
     
-    local decision=""
-    decision=$(echo "$review_output" | grep -o "### Decision: APPROVED\|### Decision: REJECTED" | head -1 | sed 's/### Decision: //')
+    local decision
+    decision=$(parse_frontmatter_decision "$REVIEW_RESULT_FILE")
     
     if [[ "$decision" == "APPROVED" ]]; then
         print_status "success" "Review ПРОЙДЕН — Задача $task_id одобрена"
         echo ""
+        review_retries=0
         return 0
+        
     elif [[ "$decision" == "REJECTED" ]]; then
         print_status "error" "Review ОТКЛОНЁН — Задаче $task_id требуются исправления"
         echo ""
-        
-        local review_results_block=""
-        review_results_block=$(echo "$review_output" | sed -n '/^REVIEW RESULTS:/,$p')
-        echo "$review_results_block" > "${PROJECT_ROOT}/.ralph_review_results.md"
-        print_status "info" "Результаты review сохранены в .ralph_review_results.md"
-        
-        local rejection_context_file="${PROJECT_ROOT}/.ralph_rejection_context.md"
-        local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
-        
-        cat > "$rejection_context_file" << REJECTION_CTX
-# Контекст отклонения Review
-
-**Время**: $timestamp
-**ID задачи**: $task_id
-
-## ⚠️ ВАЖНО: ИСПРАВЬ ЭТУ ЖЕ ЗАДАЧУ
-
-Твоя задача $task_id была отклонена на review.
-Ты ДОЛЖЕН исправить замечания и снова отправить ЕЁ ЖЕ на review.
-НЕ переходи к следующей задаче пока эта не пройдёт review.
-
----
-
-## Результаты Review
-
-$review_results_block
-
----
-
-## Требуемые действия
-
-1. Прочитай замечания reviewers выше
-2. Исправь проблемы в коде
-3. Создай файл $PENDING_TASKS_FILE с task_id: "$task_id"
-4. НЕ начинай новые задачи пока эта не одобрена
-REJECTION_CTX
-        
-        print_status "info" "Контекст отклонения сохранён в: $rejection_context_file"
+        print_status "info" "Исправления описаны в: $REVIEW_RESULT_FILE"
+        review_retries=0
         return 1
-    else
-        if [[ $review_exit_code -ne 0 ]]; then
-            print_status "failure" "Review завершился с кодом $review_exit_code"
-            return 2
-        fi
         
-        print_status "failure" "Не найден валидный REVIEW RESULTS в выводе"
+    else
+        print_status "error" "Некорректный decision в review result: '$decision'"
+        print_status "info" "Файл: $REVIEW_RESULT_FILE"
         return 2
     fi
+}
+
+mark_task_failed() {
+    local task_id="$1"
+    
+    if [[ -z "$failed_tasks" ]]; then
+        failed_tasks='["'$task_id'"]'
+    else
+        failed_tasks=$(echo "$failed_tasks" | jq --arg t "$task_id" '. + [$t]' 2>/dev/null)
+    fi
+    
+    ((consecutive_failures++))
+}
+
+create_escalation_for_review_failure() {
+    local task_id="$1"
+    local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+    
+    cat > "${FEATURE_DIR}/.escalation_handoff.md" <<EOF
+# Escalation: Review Coordinator Failure
+
+**Task ID:** $task_id
+**Timestamp:** $timestamp
+**Severity:** BLOCKER
+
+## Problem
+
+Review coordinator failed to create result file after $review_retries attempts.
+
+## Required Actions
+
+1. Review coordinator logs for errors
+2. Check if review coordinator prompt is correct
+3. Verify Kilo daemon is running
+4. Check disk space and permissions in $FEATURE_DIR
+
+## State
+
+- Iteration: $iteration
+- Consecutive failures: $consecutive_failures
+- Failed tasks: ${failed_tasks:-[]}
+EOF
+    
+    print_status "info" "Escalation created: ${FEATURE_DIR}/.escalation_handoff.md"
 }
 
 do_commit() {
@@ -525,6 +576,37 @@ extract_feature_name() {
     local dirname=$(dirname "$tasks_path")
     local basename=$(basename "$dirname")
     echo "$basename"
+}
+
+migrate_old_files() {
+    local migrated=0
+    
+    local old_files=(
+        ".ralph_state.json"
+        ".ralph_loop.log"
+        ".ralph_pending_tasks.json"
+        ".ralph_rejection_context.md"
+        ".ralph_review_results.md"
+        ".ralph_status_cache"
+        ".ralph_frontmatter_cache"
+    )
+    
+    for old_file in "${old_files[@]}"; do
+        local old_path="${PROJECT_ROOT}/${old_file}"
+        local new_path="${FEATURE_DIR}/${old_file}"
+        
+        if [[ -f "$old_path" ]] && [[ ! -f "$new_path" ]]; then
+            print_status "info" "Migrating old file: $old_file → $FEATURE_DIR/"
+            mv "$old_path" "$new_path" 2>/dev/null && ((migrated++))
+        fi
+    done
+    
+    rm -f "${PROJECT_ROOT}/.ralph_rejection_context.md" 2>/dev/null
+    rm -f "${PROJECT_ROOT}/.ralph_review_results.md" 2>/dev/null
+    
+    if [[ $migrated -gt 0 ]]; then
+        print_status "success" "Migrated $migrated file(s) to new format"
+    fi
 }
 #endregion
 
@@ -564,16 +646,6 @@ main() {
         cd "$WORKING_DIRECTORY"
     fi
     
-    LOG_FILE="${PROJECT_ROOT}/.ralph_loop.log"
-    STATE_FILE="${PROJECT_ROOT}/.ralph_state.json"
-    PENDING_TASKS_FILE="${PROJECT_ROOT}/.ralph_pending_tasks.json"
-    STATUS_CACHE_FILE="${PROJECT_ROOT}/.ralph_status_cache"
-    FRONTMATTER_CACHE_FILE="${PROJECT_ROOT}/.ralph_frontmatter_cache"
-    
-    touch "$LOG_FILE" && chmod 600 "$LOG_FILE"
-    touch "$STATE_FILE" && chmod 600 "$STATE_FILE"
-    
-    exec > >(tee -a "$LOG_FILE") 2>&1
     
     PROMPT_FILE="${PROJECT_ROOT}/${PROMPT_FILE}"
     if [[ ! -f "$PROMPT_FILE" ]]; then
@@ -596,16 +668,34 @@ main() {
         fi
     fi
     echo $$ > "$LOCK_FILE"
-    trap 'rm -f "$LOCK_FILE"' EXIT
+
+    # Save original file descriptors for proper tee cleanup
+    exec 3>&1 4>&2
+    trap 'exec 1>&3 2>&4; wait $TEE_PID 2>/dev/null; rm -f "$LOCK_FILE"' EXIT
     
     local FEATURE_NAME=$(extract_feature_name "$TASKS_PATH")
     local FEATURE_DIR=$(dirname "$TASKS_PATH")
     local TASKS_DIR="${FEATURE_DIR}/tasks"
     
+    LOG_FILE="${FEATURE_DIR}/.ralph_loop.log"
+    STATE_FILE="${FEATURE_DIR}/.ralph_state.json"
+    PENDING_TASKS_FILE="${FEATURE_DIR}/.ralph_pending_tasks.json"
+    STATUS_CACHE_FILE="${FEATURE_DIR}/.ralph_status_cache"
+    FRONTMATTER_CACHE_FILE="${FEATURE_DIR}/.ralph_frontmatter_cache"
+    REVIEW_RESULT_FILE="${FEATURE_DIR}/.ralph_review_result.md"
+    
     if [[ ! -d "$TASKS_DIR" ]]; then
         echo "⚠️  Предупреждение: Директория tasks не найдена: $TASKS_DIR (используется старый формат)" >&2
         TASKS_DIR=""
     fi
+    
+    migrate_old_files
+    
+    touch "$LOG_FILE" && chmod 600 "$LOG_FILE"
+    touch "$STATE_FILE" && chmod 600 "$STATE_FILE"
+    
+    exec > >(tee -a "$LOG_FILE") 2>&1
+    TEE_PID=$!
     
     echo "🚀 Запуск Ralph Loop..."
     echo "Задачи: $TASKS_PATH"
@@ -618,8 +708,10 @@ main() {
     local iteration=0
     local tasks_completed=0
     local consecutive_failures=0
+    local review_retries=0
     local review_failures=0
     local total_attempts=0
+    local failed_tasks="[]"
     local max_total_attempts=$((MAX_ITERATIONS * MAX_TOTAL_ATTEMPTS_MULTIPLIER))
     
     build_task_status_cache "$TASKS_PATH" "$STATUS_CACHE_FILE"
@@ -816,11 +908,23 @@ main() {
         
         build_task_status_cache "$TASKS_PATH" "$STATUS_CACHE_FILE"
         
-        do_commit "$FEATURE_NAME" "$pending_task_id" "$iteration"
+        if [[ "$NO_COMMIT" != "true" ]]; then
+            do_commit "$FEATURE_NAME" "$pending_task_id" "$iteration"
+        else
+            print_status "info" "Коммит пропущен (--no-commit)"
+        fi
         ((tasks_completed++))
         
         rm -f "$PENDING_TASKS_FILE"
-        rm -f "${PROJECT_ROOT}/.ralph_rejection_context.md"
+        
+        if [[ -f "$REVIEW_RESULT_FILE" ]]; then
+            local review_decision
+            review_decision=$(parse_frontmatter_decision "$REVIEW_RESULT_FILE")
+            if [[ "$review_decision" == "APPROVED" ]]; then
+                rm -f "$REVIEW_RESULT_FILE"
+            fi
+        fi
+        
         rm -f "$FRONTMATTER_CACHE_FILE"
         
         save_state "IDLE" "$iteration" ""

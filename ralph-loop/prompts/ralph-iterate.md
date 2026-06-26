@@ -4,7 +4,7 @@ You will receive a single task file path in the $TASKS_PATH variable.
 
 Before starting:
 1. Read the task file at $TASKS_PATH
-2. **If .ralph_rejection_context.md exists**: 
+2. **If $REVIEW_RESULT_FILE exists with REJECTED decision**: 
    - Read it to understand previous review rejection
    - Fix the SAME task that was rejected
    - DO NOT move to the next task
@@ -15,6 +15,8 @@ Implement the task:
 - DO NOT mark task as [x] - it will be marked after review
 
 After completing the task, create file "$PENDING_TASKS_FILE":
+
+Note: $REVIEW_RESULT_FILE is the path where review coordinator will write the result.
 
 ```json
 {
@@ -34,7 +36,7 @@ This file means: "I finished programming this task, ready for review".
 - Жди review результата
 
 Если review REJECTED, на следующей итерации:
-- Прочитай .ralph_rejection_context.md
+- Прочитай $REVIEW_RESULT_FILE
 - Исправь замечания в ТОЙ ЖЕ задаче
 - Снова создай $PENDING_TASKS_FILE с тем же task_id
 

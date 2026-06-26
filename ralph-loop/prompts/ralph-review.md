@@ -6,6 +6,7 @@
 
 - Файл задач: $TASKS_PATH
 - Файл с выполненной задачей: $PENDING_TASKS_FILE
+- Файл для записи результата: $REVIEW_RESULT_FILE
 
 ## Порядок действий
 
@@ -19,53 +20,56 @@
 
 ## Формат результата
 
-Выведи в формате markdown. Начни с маркера `REVIEW RESULTS:`.
+Создай файл $REVIEW_RESULT_FILE со следующим содержимым:
 
-### Если все reviewers одобрили (нет HIGH проблем):
+```markdown
+---
+decision: APPROVED
+task_id: T001
+reviewers:
+  - review-security
+  - review-architect-backend
+verdicts:
+  review-security: APPROVED
+  review-architect-backend: APPROVED
+high_issues: 0
+medium_issues: 2
+low_issues: 3
+---
 
-```
-REVIEW RESULTS:
+# Review Results
 
-### review-dba
-| Severity | File | Line | Problem | Suggestion |
-|----------|------|------|---------|------------|
-| LOW | ... | ... | ... | ... |
-
-**Verdict:** APPROVED
+## Task: T001 - Task Name
 
 ### review-security
-| Severity | Section | Line | Problem | Suggestion |
-|----------|---------|------|---------|------------|
-| LOW | ... | ... | ... | ... |
+| Severity | File | Line | Problem | Suggestion |
+|----------|------|------|---------|------------|
+| MEDIUM | file.cs | 42 | Проблема | Решение |
 
 **Verdict:** APPROVED
 
-### Decision: APPROVED
-```
-
-### Если есть HIGH проблемы или reviewer отклонил:
-
-```
-REVIEW RESULTS:
-
-### review-dba
+### review-architect-backend
 | Severity | File | Line | Problem | Suggestion |
 |----------|------|------|---------|------------|
-| HIGH | ... | ... | ... | ... |
-| MEDIUM | ... | ... | ... | ... |
+| LOW | file.cs | 10 | Проблема | Решение |
 
-**Verdict:** REJECTED
+**Verdict:** APPROVED
 
-### Decision: REJECTED
-
-## FIX REQUIRED:
-
-1. [критичная проблема] Описание что исправить
-2. [критичная проблема] Описание что исправить
+## Decision: APPROVED
 ```
 
-ВАЖНО: 
-- Всегда начинай вывод с `REVIEW RESULTS:` на отдельной строке
-- `### Decision:` должен быть либо `APPROVED` либо `REJECTED`
-- При REJECTED обязательно укажи `## FIX REQUIRED:` с конкретными действиями
-- Детали всех reviewers важны для понимания контекста
+При REJECTED добавь секцию:
+
+```markdown
+## Fix Required
+
+1. **[HIGH]** Удалить захардкоженный пароль из config.json — вынести в переменную окружения
+2. **[MEDIUM]** Добавить валидацию входных данных
+```
+
+ВАЖНО:
+- Файл должен начинаться с YAML frontmatter между линиями `---`
+- Поле `decision` должно быть `APPROVED` или `REJECTED`
+- Поле `task_id` должно соответствовать задаче из $PENDING_TASKS_FILE
+- При REJECTED обязательно добавь секцию `## Fix Required` с конкретными действиями
+- Используй atomic write: пиши в temp файл, затем переименуй в $REVIEW_RESULT_FILE
