@@ -2,3 +2,4 @@ config.json
 .env
 *.secret
 .kilo/plans/
+.kilo/package-lock.json
