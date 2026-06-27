@@ -26,8 +26,7 @@ set -euo pipefail
 
 #region Константы
 readonly MAX_CONSECUTIVE_FAILURES=3
-readonly MAX_REVIEW_FAILURES=2
-readonly MAX_TASK_REJECTIONS=3
+readonly MAX_TASK_REJECTIONS=5
 readonly MAX_BACKOFF_SECONDS=60
 readonly MAX_TOTAL_ATTEMPTS_MULTIPLIER=10
 readonly DEFAULT_MAX_ITERATIONS=50
@@ -486,6 +485,7 @@ save_state() {
     local state="$1"
     local iteration="$2"
     local current_task="$3"
+    local _empty_json='{}'
     
     local json_content=$(cat << STATE_JSON
 {
@@ -495,14 +495,13 @@ save_state() {
   "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
   "pid": $$,
   "review_retries": ${review_retries:-0},
-  "review_failures": ${review_failures:-0},
   "tasks_completed": ${tasks_completed:-0},
   "total_attempts": ${total_attempts:-0},
   "failed_tasks": $(echo "${failed_tasks:-[]}" | jq -c . 2>/dev/null || echo "[]"),
   "consecutive_failures": ${consecutive_failures:-0},
   "impl_failures": ${impl_failures:-0},
   "infra_failures": ${infra_failures:-0},
-  "task_rejection_counts": $(echo "${task_rejection_counts:-{}}" | jq -c . 2>/dev/null || echo "{}")
+  "task_rejection_counts": $(echo "${task_rejection_counts:-$_empty_json}" | jq -c . 2>/dev/null || echo "{}")
 }
 STATE_JSON
 )
@@ -525,8 +524,6 @@ load_state() {
     saved_iteration=$(jq -r '.iteration // 0' "$STATE_FILE" 2>/dev/null)
     local saved_review_retries
     saved_review_retries=$(jq -r '.review_retries // 0' "$STATE_FILE" 2>/dev/null)
-    local saved_review_failures
-    saved_review_failures=$(jq -r '.review_failures // 0' "$STATE_FILE" 2>/dev/null)
     local saved_tasks_completed
     saved_tasks_completed=$(jq -r '.tasks_completed // 0' "$STATE_FILE" 2>/dev/null)
     local saved_total_attempts
@@ -544,14 +541,14 @@ load_state() {
     
     iteration=${saved_iteration:-0}
     review_retries=${saved_review_retries:-0}
-    review_failures=${saved_review_failures:-0}
     tasks_completed=${saved_tasks_completed:-0}
     total_attempts=${saved_total_attempts:-0}
     consecutive_failures=${saved_consecutive_failures:-0}
     impl_failures=${saved_impl_failures:-0}
     infra_failures=${saved_infra_failures:-0}
     failed_tasks="${saved_failed_tasks:-[]}"
-    task_rejection_counts="${saved_rejection_counts:-{}}"
+    local _empty_json='{}'
+    task_rejection_counts="${saved_rejection_counts:-$_empty_json}"
     
     print_status "info" "Восстановление состояния: iteration=$iteration, tasks_completed=$tasks_completed, consecutive_failures=$consecutive_failures"
     
@@ -589,7 +586,9 @@ run_review_gate() {
     set +e
     $KILO_CMD run --auto "$PROMPT"
     local exit_code=$?
-    set -e
+    # Do NOT re-enable errexit here — the caller manages it.
+    # Re-enabling errexit inside this function causes return 1 to kill the script
+    # even though the caller did set +e before calling us.
     
     if [[ ! -f "$REVIEW_RESULT_FILE" ]]; then
         ((review_retries++))
@@ -889,7 +888,6 @@ main() {
     local impl_failures=0
     local infra_failures=0
     local review_retries=0
-    local review_failures=0
     local total_attempts=0
     local failed_tasks="[]"
     local task_rejection_counts="{}"
@@ -1112,12 +1110,11 @@ main() {
             continue
             
         elif [[ $review_result -eq 1 ]]; then
-            ((review_failures++))
             ((iteration++))
-            print_status "failure" "Неудача review $review_failures/$MAX_REVIEW_FAILURES (итерация $iteration)"
             
             local current_rejections
-            current_rejections=$(echo "$task_rejection_counts" | jq -r --arg t "$pending_task_id" '.[$t] // 0' 2>/dev/null || echo "0")
+            current_rejections=$(echo "$task_rejection_counts" | jq -r --arg t "$pending_task_id" '.[$t] // 0' 2>/dev/null | head -1 | tr -dc '0-9')
+            [[ -z "$current_rejections" ]] && current_rejections=0
             ((current_rejections++))
             task_rejection_counts=$(echo "$task_rejection_counts" | jq --arg t "$pending_task_id" --argjson c "$current_rejections" '.[$t] = $c' 2>/dev/null || echo "{}")
             
@@ -1130,11 +1127,6 @@ main() {
                 exit 1
             fi
             
-            if [[ $review_failures -ge $MAX_REVIEW_FAILURES ]]; then
-                print_status "error" "Слишком много неудач review"
-                print_summary "$tasks_completed" "REVIEW_FAILURES" "$total_attempts"
-                exit 1
-            fi
             
             if [[ $iteration -ge $MAX_ITERATIONS ]]; then
                 print_status "error" "Достигнут максимум итераций"
@@ -1150,7 +1142,6 @@ main() {
         # ФАЗА 3: Пометить выполненной и закоммитить
         # =====================================================
         
-        review_failures=0
         task_rejection_counts=$(echo "$task_rejection_counts" | jq --arg t "$pending_task_id" 'del(.[$t])' 2>/dev/null || echo "{}")
         save_state "COMMITTING" "$iteration" "$pending_task_id"
         

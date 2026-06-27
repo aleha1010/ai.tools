@@ -4,10 +4,18 @@ You will receive a single task file path in the $TASKS_PATH variable.
 
 Before starting:
 1. Read the task file at $TASKS_PATH
-2. **If $REVIEW_RESULT_FILE exists with REJECTED decision**: 
-   - Read it to understand previous review rejection
-   - Fix the SAME task that was rejected
-   - DO NOT move to the next task
+2. **Check if $REVIEW_RESULT_FILE exists** (use bash test, NOT Read tool):
+   ```bash
+   test -f "$REVIEW_RESULT_FILE" && echo "EXISTS" || echo "NOT_EXISTS"
+   ```
+   
+   - If output is "EXISTS" and file contains REJECTED decision:
+     - Read $REVIEW_RESULT_FILE to understand previous review rejection
+     - Fix the SAME task that was rejected
+     - DO NOT move to the next task
+   
+   - If output is "NOT_EXISTS":
+     - First iteration - implement task from scratch
 
 Implement the task:
 - Follow TDD: write tests first, then implementation
