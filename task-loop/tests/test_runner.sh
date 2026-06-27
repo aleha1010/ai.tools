@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# Простой тестовый раннер для Ralph Loop
+# Простой тестовый раннер для Task Loop
 # Запуск: ./test_runner.sh
 #
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RALPH_LOOP_DIR="$(dirname "$SCRIPT_DIR")"
-RALPH_LOOP_SCRIPT="$RALPH_LOOP_DIR/scripts/ralph_loop.sh"
+TASK_LOOP_DIR="$(dirname "$SCRIPT_DIR")"
+TASK_LOOP_SCRIPT="$TASK_LOOP_DIR/scripts/task_loop.sh"
 
 # Цвета для вывода
 RED='\033[0;31m'
@@ -26,8 +26,8 @@ setup() {
     cd "$TEST_TMP_DIR"
     
     mkdir -p .kilo/prompts
-    echo "Test prompt" > .kilo/prompts/ralph-iterate.md
-    echo "Test review prompt" > .kilo/prompts/ralph-review.md
+    echo "Test prompt" > .kilo/prompts/task-iterate.md
+    echo "Test review prompt" > .kilo/prompts/task-review.md
     
     git init -q
     git config user.email "test@test.com"
@@ -45,8 +45,8 @@ EOF
     git add -A
     git commit -q -m "Initial commit"
     
-    # Создаём .ralph_state.json
-    export STATE_FILE="$TEST_TMP_DIR/.ralph_state.json"
+    # Создаём .task_loop_state.json
+    export STATE_FILE="$TEST_TMP_DIR/.task_loop_state.json"
     echo '{"state": "IDLE", "iteration": 0, "current_task": "", "timestamp": "", "pid": 0}' > "$STATE_FILE"
 }
 
@@ -216,7 +216,7 @@ EOF
         local iteration=$1
         local task_id=$2
         local pending_file=$3
-        local review_prompt_file="${REVIEW_PROMPT_FILE:-.kilo/prompts/ralph-review.md}"
+        local review_prompt_file="${REVIEW_PROMPT_FILE:-.kilo/prompts/task-review.md}"
         
         if [[ "${NO_REVIEW:-false}" == "true" ]]; then
             print_status "info" "Review gate disabled (--no-review)"
@@ -256,9 +256,9 @@ EOF
             
             local review_results_block=""
             review_results_block=$(echo "$review_output" | sed -n '/^REVIEW RESULTS:/,$p')
-            echo "$review_results_block" > "${PROJECT_ROOT}/.ralph_review_results.md"
+            echo "$review_results_block" > "${PROJECT_ROOT}/.task_loop_review_result.md"
             
-            local rejection_context_file="${PROJECT_ROOT}/.ralph_rejection_context.md"
+            local rejection_context_file="${PROJECT_ROOT}/.task_loop_rejection_context.md"
             local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
             
             cat > "$rejection_context_file" << REJECTION_CTX
@@ -533,7 +533,7 @@ EOF
     
     set +e
     local output
-    output=$(bash "$RALPH_LOOP_SCRIPT" --tasks-path "$TEST_TMP_DIR/specs/001-test/tasks.md" --max-iterations 10 2>&1)
+    output=$(bash "$TASK_LOOP_SCRIPT" --tasks-path "$TEST_TMP_DIR/specs/001-test/tasks.md" --max-iterations 10 2>&1)
     local exit_code=$?
     set -e
     
@@ -553,12 +553,12 @@ EOF
 test_review_gate_approves_on_approved_decision() {
     source_functions
     
-    export REVIEW_PROMPT_FILE="$TEST_TMP_DIR/.kilo/prompts/ralph-review.md"
+    export REVIEW_PROMPT_FILE="$TEST_TMP_DIR/.kilo/prompts/task-review.md"
     export NO_REVIEW="false"
     export PROJECT_ROOT="$TEST_TMP_DIR"
     export KILO_CMD='echo "### Decision: APPROVED"'
     
-    local pending_file="$TEST_TMP_DIR/.ralph_pending_tasks.json"
+    local pending_file="$TEST_TMP_DIR/.task_loop_pending_tasks.json"
     echo '{"task_id": "T001", "files_changed": [], "summary": "test"}' > "$pending_file"
     
     set +e
@@ -577,7 +577,7 @@ test_review_gate_approves_on_approved_decision() {
 test_review_gate_rejects_on_rejected_decision() {
     source_functions
     
-    export REVIEW_PROMPT_FILE="$TEST_TMP_DIR/.kilo/prompts/ralph-review.md"
+    export REVIEW_PROMPT_FILE="$TEST_TMP_DIR/.kilo/prompts/task-review.md"
     export NO_REVIEW="false"
     export PROJECT_ROOT="$TEST_TMP_DIR"
     export KILO_CMD='echo "REVIEW RESULTS:
@@ -587,7 +587,7 @@ test_review_gate_rejects_on_rejected_decision() {
 ## FIX REQUIRED:
 1. Fix this"'
     
-    local pending_file="$TEST_TMP_DIR/.ralph_pending_tasks.json"
+    local pending_file="$TEST_TMP_DIR/.task_loop_pending_tasks.json"
     echo '{"task_id": "T001", "files_changed": [], "summary": "test"}' > "$pending_file"
     
     set +e
@@ -606,7 +606,7 @@ test_review_gate_rejects_on_rejected_decision() {
 test_review_gate_creates_rejection_context() {
     source_functions
     
-    export REVIEW_PROMPT_FILE="$TEST_TMP_DIR/.kilo/prompts/ralph-review.md"
+    export REVIEW_PROMPT_FILE="$TEST_TMP_DIR/.kilo/prompts/task-review.md"
     export NO_REVIEW="false"
     export PROJECT_ROOT="$TEST_TMP_DIR"
     export KILO_CMD='echo "REVIEW RESULTS:
@@ -616,14 +616,14 @@ test_review_gate_creates_rejection_context() {
 ## FIX REQUIRED:
 1. Fix this"'
     
-    local pending_file="$TEST_TMP_DIR/.ralph_pending_tasks.json"
+    local pending_file="$TEST_TMP_DIR/.task_loop_pending_tasks.json"
     echo '{"task_id": "T001", "files_changed": [], "summary": "test"}' > "$pending_file"
     
     set +e
     run_review_gate 1 "T001" "$pending_file" > /dev/null 2>&1
     set -e
     
-    if [[ -f "$TEST_TMP_DIR/.ralph_rejection_context.md" ]]; then
+    if [[ -f "$TEST_TMP_DIR/.task_loop_rejection_context.md" ]]; then
         return 0
     else
         echo "Rejection context file should be created" >&2
@@ -746,7 +746,7 @@ SCRIPT
 test_task_selection_continues_interrupted() {
     source_functions
     
-    local state_file="$TEST_TMP_DIR/.ralph_state.json"
+    local state_file="$TEST_TMP_DIR/.task_loop_state.json"
     mkdir -p "$(dirname "$state_file")"
     
     cat > "$state_file" << EOF
@@ -908,12 +908,12 @@ SCRIPT
 }
 
 test_review_result_deleted_after_approved() {
-    # Test that .ralph_review_result.md is deleted after APPROVED
+    # Test that .task_loop_review_result.md is deleted after APPROVED
     # to prevent stale results from affecting next task
     
     source_functions
     
-    local review_file="$TEST_TMP_DIR/.ralph_review_result.md"
+    local review_file="$TEST_TMP_DIR/.task_loop_review_result.md"
     mkdir -p "$(dirname "$review_file")"
     
     # Create APPROVED review result
@@ -954,8 +954,8 @@ test_stale_review_result_cleaned_on_startup() {
     
     source_functions
     
-    local state_file="$TEST_TMP_DIR/.ralph_state.json"
-    local review_file="$TEST_TMP_DIR/.ralph_review_result.md"
+    local state_file="$TEST_TMP_DIR/.task_loop_state.json"
+    local review_file="$TEST_TMP_DIR/.task_loop_review_result.md"
     mkdir -p "$(dirname "$state_file")" "$(dirname "$review_file")"
     
     # Create stale APPROVED review result from previous run
@@ -997,7 +997,7 @@ test_rejected_state_saved_before_max_iterations() {
     
     source_functions
     
-    local state_file="$TEST_TMP_DIR/.ralph_state.json"
+    local state_file="$TEST_TMP_DIR/.task_loop_state.json"
     mkdir -p "$(dirname "$state_file")"
     
     # Simulate: iteration=1, MAX_ITERATIONS=1, REJECTED
@@ -1037,14 +1037,14 @@ test_review_gate_return_1_does_not_kill_caller() {
     # When the function returns 1 (REJECTED), the script dies before
     # "local review_result=$?" is reached.
     #
-    # This test verifies the real ralph_loop.sh does NOT have "set -e" inside
+    # This test verifies the real task_loop.sh does NOT have "set -e" inside
     # run_review_gate after the kilo run block, so return 1 doesn't kill the script.
     
-    local ralph_script="$RALPH_LOOP_SCRIPT"
+    local task_script="$TASK_LOOP_SCRIPT"
     
     # Extract the run_review_gate function body from the real script
     local func_body
-    func_body=$(sed -n '/^run_review_gate()/,/^}/p' "$ralph_script")
+    func_body=$(sed -n '/^run_review_gate()/,/^}/p' "$task_script")
     
     # Count "set -e" occurrences inside run_review_gate
     # There should be ZERO "set -e" lines (only "set +e" before kilo)
@@ -1074,21 +1074,21 @@ test_brace_default_produces_valid_json() {
     # This test verifies the actual code in load_state doesn't use
     # the broken ${var:-{}} pattern.
     
-    local ralph_script="$RALPH_LOOP_SCRIPT"
+    local task_script="$TASK_LOOP_SCRIPT"
     
     # Search for the broken pattern ${...:-{}} in the script
     local broken_count
-    broken_count=$(grep -c ':-{}' "$ralph_script" 2>/dev/null || true)
+    broken_count=$(grep -c ':-{}' "$task_script" 2>/dev/null || true)
     
     # Allow it in comments/heredocs, but not in actual assignments
     # Check specifically for assignment patterns with :-{}
     local broken_assignments
-    broken_assignments=$(grep -E '^\s*\w+=.*:-\{\}\}' "$ralph_script" 2>/dev/null | grep -v '^#' | grep -v '<<' || true)
+    broken_assignments=$(grep -E '^\s*\w+=.*:-\{\}\}' "$task_script" 2>/dev/null | grep -v '^#' | grep -v '<<' || true)
     
     if [[ -z "$broken_assignments" ]]; then
         return 0
     else
-        echo "BUG: Found broken \${var:-{}} assignment pattern in ralph_loop.sh" >&2
+        echo "BUG: Found broken \${var:-{}} assignment pattern in task_loop.sh" >&2
         echo "$broken_assignments" >&2
         return 1
     fi
@@ -1106,20 +1106,20 @@ test_current_rejections_handles_multiline_jq_output() {
     # This test verifies the real script sanitizes current_rejections
     # to a single numeric value before using it in ((...)).
     
-    local ralph_script="$RALPH_LOOP_SCRIPT"
+    local task_script="$TASK_LOOP_SCRIPT"
     
     # Find the line that computes current_rejections from jq
     local rej_line
-    rej_line=$(grep -n 'current_rejections=.*jq' "$ralph_script" | head -1 || true)
+    rej_line=$(grep -n 'current_rejections=.*jq' "$task_script" | head -1 || true)
     
     if [[ -z "$rej_line" ]]; then
-        echo "BUG: Cannot find current_rejections assignment in ralph_loop.sh" >&2
+        echo "BUG: Cannot find current_rejections assignment in task_loop.sh" >&2
         return 1
     fi
     
     local line_num=$(echo "$rej_line" | cut -d: -f1)
     local next_line
-    next_line=$(sed -n "$((line_num+1))p" "$ralph_script")
+    next_line=$(sed -n "$((line_num+1))p" "$task_script")
     
     # The next line should use ((current_rejections++)) — check it's preceded by sanitization
     # Look for head -1 or tr -dc in the jq pipeline or on the current_rejections line
@@ -1147,17 +1147,17 @@ test_max_review_failures_not_used() {
     # RED: This test should FAIL if MAX_REVIEW_FAILURES is still in the script
     # GREEN: After removing MAX_REVIEW_FAILURES, this test passes
     
-    local ralph_script="$RALPH_LOOP_SCRIPT"
+    local task_script="$TASK_LOOP_SCRIPT"
     
     # Check that MAX_REVIEW_FAILURES constant is removed
-    if grep -q 'readonly MAX_REVIEW_FAILURES' "$ralph_script"; then
+    if grep -q 'readonly MAX_REVIEW_FAILURES' "$task_script"; then
         echo "BUG: MAX_REVIEW_FAILURES constant still exists — should be removed" >&2
         return 1
     fi
     
     # Check that review_failures variable is not used for limiting
     local review_failures_usage
-    review_failures_usage=$(grep -n 'if.*review_failures.*-ge' "$ralph_script" 2>/dev/null || true)
+    review_failures_usage=$(grep -n 'if.*review_failures.*-ge' "$task_script" 2>/dev/null || true)
     
     if [[ -n "$review_failures_usage" ]]; then
         echo "BUG: review_failures still used for limiting rejections:" >&2
@@ -1170,9 +1170,9 @@ test_max_review_failures_not_used() {
 
 test_max_task_rejections_exists() {
     # Verify MAX_TASK_REJECTIONS constant exists
-    local ralph_script="$RALPH_LOOP_SCRIPT"
+    local task_script="$TASK_LOOP_SCRIPT"
     
-    if ! grep -q 'readonly MAX_TASK_REJECTIONS=5' "$ralph_script"; then
+    if ! grep -q 'readonly MAX_TASK_REJECTIONS=5' "$task_script"; then
         echo "BUG: MAX_TASK_REJECTIONS constant not found" >&2
         return 1
     fi
@@ -1262,7 +1262,7 @@ SCRIPT
 
 main() {
     echo "========================================"
-    echo "Ralph Loop Test Suite"
+    echo "Task Loop Test Suite"
     echo "========================================"
     echo ""
     
@@ -1329,7 +1329,7 @@ main() {
     echo "Running additional test suites..."
     echo ""
     
-    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local script_dir="$SCRIPT_DIR"
     
     if [[ -f "$script_dir/test_parse_frontmatter.sh" ]]; then
         bash "$script_dir/test_parse_frontmatter.sh" || exit 1

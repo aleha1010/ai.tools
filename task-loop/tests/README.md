@@ -1,4 +1,4 @@
-# Тесты Ralph Loop
+# Тесты Task Loop
 
 ## Запуск
 
@@ -34,7 +34,7 @@ tests/
 Скрипт поддерживает переопределение команд через переменные окружения:
 
 ```bash
-KILO_CMD=/path/to/mock_kilo ./scripts/ralph_loop.sh ...
+KILO_CMD=/path/to/mock_kilo ./scripts/task_loop.sh ...
 GIT_CMD=/path/to/mock_git ...
 SLEEP_CMD=/path/to/mock_sleep ...
 ```

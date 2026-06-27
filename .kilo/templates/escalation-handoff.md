@@ -75,4 +75,4 @@
 2. Создаёт fix-задачи с `parent` полем
 3. Обновляет dependencies
 4. Пользователь подтверждает `.proposed_fix_tasks.md`
-5. Ralph Loop продолжается
+5. Task Loop продолжается

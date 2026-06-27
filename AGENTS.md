@@ -1,13 +1,13 @@
 # AI Tools Repository
 
-Collection of agent tools for AI-assisted development: agents, skills, and Ralph Loop orchestrator.
+Collection of agent tools for AI-assisted development: agents, skills, and Task Loop orchestrator.
 
 ## Structure
 
 ```
 agents/              # Agent definitions (wrappers for Task tool → skills)
 skills/              # Reusable instruction files (SKILL.md per skill)
-ralph-loop/          # Autonomous TDD orchestrator with multi-agent review
+task-loop/           # Autonomous TDD orchestrator with multi-agent review
 ```
 
 ## Skills
@@ -50,7 +50,7 @@ Agents are wrappers that call skills via Task tool. Located in `agents/*.md`.
 | `tdd-implementer` | `tdd` | TDD implementation with red-green-refactor |
 | `review-*` | `review-*` | Structured code review for specific domain |
 
-## Ralph Loop
+## Task Loop
 
 Autonomous TDD orchestrator: **Implementation → Review → Commit**.
 
@@ -63,7 +63,7 @@ Autonomous TDD orchestrator: **Implementation → Review → Commit**.
 ### Usage
 
 ```bash
-./ralph-loop/scripts/ralph_loop.sh --tasks-path specs/001-feature/tasks.md
+./task-loop/scripts/task_loop.sh --tasks-path specs/001-feature/tasks.md
 ```
 
 ### Key Flags
@@ -85,14 +85,14 @@ Autonomous TDD orchestrator: **Implementation → Review → Commit**.
 
 | File | Purpose |
 |------|---------|
-| `.ralph_state.json` | State machine tracking |
-| `.ralph_loop.log` | Execution log |
-| `.ralph_rejection_context.md` | Context for fixing REJECTED tasks |
+| `.task_loop_state.json` | State machine tracking |
+| `.task_loop.log` | Execution log |
+| `.task_loop_rejection_context.md` | Context for fixing REJECTED tasks |
 
 ### Testing
 
 ```bash
-./ralph-loop/tests/test_runner.sh
+./task-loop/tests/test_runner.sh
 ```
 
 Uses DI via env vars: `KILO_CMD`, `GIT_CMD`, `SLEEP_CMD`.

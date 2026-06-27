@@ -413,7 +413,7 @@ graph.invoke(None, config={"thread_id": "session-123"})
 
 **Принцип:** Когда reviewers reject work, сохранять rejection reasons и context для следующей итерации.
 
-**Пример:** `.ralph_rejection_context.md` с причинами отклонения.
+**Пример:** `.task_loop_rejection_context.md` с причинами отклонения.
 
 ### Summarize Intermediate Results
 

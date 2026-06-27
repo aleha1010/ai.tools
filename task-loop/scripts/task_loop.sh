@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# ralph_loop.sh - Ralph loop orchestrator for Kilo CLI with Review Gate
+# task_loop.sh - Task loop orchestrator for Kilo CLI with Review Gate
 #
 # Использование:
-#   ./ralph_loop.sh --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--no-commit] [--working-directory DIR]
+#   ./task_loop.sh --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--no-commit] [--working-directory DIR]
 #
 # Конфигурация:
 #   --tasks-path PATH        Путь к tasks.md (обязательно)
@@ -17,12 +17,14 @@
 #   - Одна задача за итерацию с обязательным review
 #   - Мульти-агентное review перед отметкой задачи выполненной
 #   - Circuit breaker: остановка после 3 последовательных неудач
-#   - Tolерантность к неудачам review: 2 неудачи review до остановки
+#   - Retry при инфраструктурном сбое review: до 2 попыток (если kilo не создал result file), затем escalation
 #   - Exponential backoff при неудачах (макс 60с)
 #   - Информативный вывод с временными метками
 #
 
 set -euo pipefail
+
+umask 077
 
 #region Константы
 readonly MAX_CONSECUTIVE_FAILURES=3
@@ -42,10 +44,8 @@ NO_REVIEW=false
 NO_COMMIT=false
 WORKING_DIRECTORY=""
 PROJECT_ROOT=""
-FORCE_LOCK=false
-PROMPT_FILE=".kilo/prompts/ralph-iterate.md"
-REVIEW_PROMPT_FILE=".kilo/prompts/ralph-review.md"
-LOCK_FILE="/tmp/ralph_loop_${USER}.lock"
+PROMPT_FILE=".kilo/prompts/task-iterate.md"
+REVIEW_PROMPT_FILE=".kilo/prompts/task-review.md"
 LOG_FILE=""
 STATE_FILE=""
 PENDING_TASKS_FILE=""
@@ -301,10 +301,6 @@ parse_args() {
                 NO_COMMIT=true
                 shift
                 ;;
-            --force)
-                FORCE_LOCK=true
-                shift
-                ;;
             --working-directory)
                 if [[ -z "${2:-}" ]]; then
                     echo "Ошибка: --working-directory требует значение" >&2
@@ -314,7 +310,7 @@ parse_args() {
                 shift 2
                 ;;
             --help|-h)
-                echo "Использование: $0 --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--no-commit] [--force] [--working-directory DIR]"
+                echo "Использование: $0 --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--no-commit] [--working-directory DIR]"
                 echo ""
                 echo "Параметры:"
                 echo "  --tasks-path PATH        Путь к tasks.md (обязательно)"
@@ -322,9 +318,13 @@ parse_args() {
                 echo "  --verbose                Подробный вывод"
                 echo "  --no-review              Отключить review gate"
                 echo "  --no-commit              Отключить git commit"
-                echo "  --force                  Удалить stale lock file и продолжить"
                 echo "  --working-directory DIR  Рабочая директория"
                 return 0
+                ;;
+            --force)
+                echo "Ошибка: --force удалён. Lock-механика больше не поддерживается." >&2
+                echo "Не запускайте несколько экземпляров параллельно." >&2
+                return 1
                 ;;
             *)
                 echo "Ошибка: Неизвестный параметр: $1" >&2
@@ -436,7 +436,7 @@ print_summary() {
     local total_attempts=${3:-0}
     echo ""
     echo "========================================================"
-    echo "  Ralph Loop — Сводка"
+    echo "  Task Loop — Сводка"
     echo "========================================================"
     echo "  Задач выполнено: $tasks_completed"
     echo "  Всего попыток: $total_attempts"
@@ -700,36 +700,6 @@ extract_feature_name() {
     local basename=$(basename "$dirname")
     echo "$basename"
 }
-
-migrate_old_files() {
-    local migrated=0
-    
-    local old_files=(
-        ".ralph_state.json"
-        ".ralph_loop.log"
-        ".ralph_pending_tasks.json"
-        ".ralph_rejection_context.md"
-        ".ralph_review_results.md"
-        ".ralph_frontmatter_cache"
-    )
-    
-    for old_file in "${old_files[@]}"; do
-        local old_path="${PROJECT_ROOT}/${old_file}"
-        local new_path="${FEATURE_DIR}/${old_file}"
-        
-        if [[ -f "$old_path" ]] && [[ ! -f "$new_path" ]]; then
-            print_status "info" "Migrating old file: $old_file → $FEATURE_DIR/"
-            mv "$old_path" "$new_path" 2>/dev/null && ((migrated++))
-        fi
-    done
-    
-    rm -f "${PROJECT_ROOT}/.ralph_rejection_context.md" 2>/dev/null
-    rm -f "${PROJECT_ROOT}/.ralph_review_results.md" 2>/dev/null
-    
-    if [[ $migrated -gt 0 ]]; then
-        print_status "success" "Migrated $migrated file(s) to new format"
-    fi
-}
 #endregion
 
 #region Функции automated test gate
@@ -830,43 +800,23 @@ main() {
         fi
     fi
     
-    if [[ -f "$LOCK_FILE" ]]; then
-        local lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
-        if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
-            if [[ "$FORCE_LOCK" == "true" ]]; then
-                echo "⚠️  --force: удаляю lock file (PID: $lock_pid)" >&2
-                rm -f "$LOCK_FILE"
-            else
-                echo "Ошибка: Другой экземпляр уже запущен (PID: $lock_pid)" >&2
-                echo "Используйте --force для принудительного запуска" >&2
-                exit 1
-            fi
-        else
-            rm -f "$LOCK_FILE"
-        fi
-    fi
-    echo $$ > "$LOCK_FILE"
-
-    # Save original file descriptors for proper tee cleanup
     exec 3>&1 4>&2
-    trap 'exec 1>&3 2>&4; wait $TEE_PID 2>/dev/null || true; rm -f "$LOCK_FILE"' EXIT
+    trap 'exec 1>&3 2>&4; wait $TEE_PID 2>/dev/null || true' EXIT
     
     local FEATURE_NAME=$(extract_feature_name "$TASKS_PATH")
     local FEATURE_DIR=$(dirname "$TASKS_PATH")
     local TASKS_DIR="${FEATURE_DIR}/tasks"
     
-    LOG_FILE="${FEATURE_DIR}/.ralph_loop.log"
-    STATE_FILE="${FEATURE_DIR}/.ralph_state.json"
-    PENDING_TASKS_FILE="${FEATURE_DIR}/.ralph_pending_tasks.json"
-    FRONTMATTER_CACHE_FILE="${FEATURE_DIR}/.ralph_frontmatter_cache"
-    REVIEW_RESULT_FILE="${FEATURE_DIR}/.ralph_review_result.md"
+    LOG_FILE="${FEATURE_DIR}/.task_loop.log"
+    STATE_FILE="${FEATURE_DIR}/.task_loop_state.json"
+    PENDING_TASKS_FILE="${FEATURE_DIR}/.task_loop_pending_tasks.json"
+    FRONTMATTER_CACHE_FILE="${FEATURE_DIR}/.task_loop_frontmatter_cache"
+    REVIEW_RESULT_FILE="${FEATURE_DIR}/.task_loop_review_result.md"
     
     if [[ ! -d "$TASKS_DIR" ]]; then
         echo "⚠️  Предупреждение: Директория tasks не найдена: $TASKS_DIR (используется старый формат)" >&2
         TASKS_DIR=""
     fi
-    
-    migrate_old_files
     
     touch "$LOG_FILE" && chmod 600 "$LOG_FILE"
     touch "$STATE_FILE" && chmod 600 "$STATE_FILE"
@@ -874,7 +824,7 @@ main() {
     exec > >(tee -a "$LOG_FILE") 2>&1
     TEE_PID=$!
     
-    echo "🚀 Запуск Ralph Loop..."
+    echo "🚀 Запуск Task Loop..."
     echo "Задачи: $TASKS_PATH"
     echo "Фича: $FEATURE_NAME"
     echo "Максимум итераций: $MAX_ITERATIONS"
@@ -1008,7 +958,7 @@ main() {
             echo "1. Review $escalation_file"
             echo "2. Run: kilo run \"Analyze escalation and create fix-tasks for $FEATURE_DIR\""
             echo "3. Review .proposed_fix_tasks.md and confirm"
-            echo "4. Re-run: ./ralph_loop.sh --tasks-path $TASKS_PATH"
+            echo "4. Re-run: ./task_loop.sh --tasks-path $TASKS_PATH"
             echo ""
             
             print_summary "$tasks_completed" "ESCALATION" "$total_attempts"

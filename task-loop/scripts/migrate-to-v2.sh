@@ -161,7 +161,7 @@ main() {
         echo "1. Review generated files in features/"
         echo "2. Fill in task specifications (test cases, implementation details)"
         echo "3. Update dependencies in task YAML frontmatter"
-        echo "4. Run: ./ralph_loop.sh --tasks-path features/001-auth/tasks.md"
+        echo "4. Run: ./task-loop/scripts/task_loop.sh --tasks-path features/001-auth/tasks.md"
     fi
 }
 

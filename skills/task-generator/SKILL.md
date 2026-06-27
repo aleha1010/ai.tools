@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Генерирует tasks.md и файлы задач из plan.md для Ralph Loop. Работает интеллектуально без bash-скриптов.
+Генерирует tasks.md и файлы задач из plan.md для Task Loop. Работает интеллектуально без bash-скриптов.
 
 ## Вход
 
@@ -125,7 +125,7 @@ valid_input:
 - [ ] {ID3}: {Title3}
 ```
 
-Порядок определяется порядком в plan.md. Ralph Loop сам определит порядок выполнения на основе dependencies.
+Порядок определяется порядком в plan.md. Task Loop сам определит порядок выполнения на основе dependencies.
 
 ### Шаг 4: Обработать escalation (если есть)
 
@@ -263,13 +263,13 @@ Implement /api/login endpoint.
 ...
 ```
 
-## Интеграция с Ralph Loop
+## Интеграция с Task Loop
 
 1. Planning Agent создаёт `plan.md` с задачами
 2. Planning Agent вызывает task-generator skill
 3. Skill создаёт `tasks.md` и файлы задач
 4. Planning Agent заполняет спецификации тестов и реализации
-5. Запускается `ralph_loop.sh --tasks-path features/001-auth/tasks.md`
+5. Запускается `task_loop.sh --tasks-path features/001-auth/tasks.md`
 
 ## Escalation Processing
 

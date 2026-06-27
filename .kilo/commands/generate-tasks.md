@@ -4,18 +4,15 @@ description: Generate tasks.md and task files from plan.md
 
 # Generate Tasks
 
-Generate Ralph Loop task structure from plan.md.
+Generate Task Loop task structure from plan.md.
 
 ## Usage
 
+Use the `task-generator` skill to generate tasks from a plan. Then run the loop:
+
 ```bash
-./ralph-loop/scripts/generate-tasks.sh --plan-path features/001-auth/plan.md
+./task-loop/scripts/task_loop.sh --tasks-path features/001-auth/tasks.md
 ```
-
-## Parameters
-
-- `--plan-path PATH` - Path to plan.md (required)
-- `--verbose` - Show detailed output
 
 ## What it does
 
@@ -54,4 +51,4 @@ features/001-auth/
 
 After generation:
 1. Fill in task specifications (test cases, implementation details)
-2. Run: `./ralph-loop/scripts/ralph_loop.sh --tasks-path features/001-auth/tasks.md`
+2. Run: `./task-loop/scripts/task_loop.sh --tasks-path features/001-auth/tasks.md`

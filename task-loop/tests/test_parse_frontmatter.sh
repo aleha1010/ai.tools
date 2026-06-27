@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RALPH_LOOP_DIR="$(dirname "$SCRIPT_DIR")"
+TASK_LOOP_DIR="$(dirname "$SCRIPT_DIR")"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,7 +34,7 @@ EOF
     
     TASKS_FILE="$TEST_TMP_DIR/features/001-auth/tasks.md"
     TASKS_DIR="$TEST_TMP_DIR/features/001-auth/tasks"
-    STATE_FILE="$TEST_TMP_DIR/.ralph_state.json"
+    STATE_FILE="$TEST_TMP_DIR/.task_loop_state.json"
     
     echo '{"state": "IDLE", "iteration": 0, "current_task": "", "timestamp": "", "pid": 0}' > "$STATE_FILE"
 }

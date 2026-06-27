@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 #
-# Integration tests for ralph_loop.sh main logic
-#
+# Integration tests for task_loop.sh main logic
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RALPH_LOOP_DIR="$(dirname "$SCRIPT_DIR")"
-RALPH_LOOP_SCRIPT="$RALPH_LOOP_DIR/scripts/ralph_loop.sh"
+TASK_LOOP_DIR="$(dirname "$SCRIPT_DIR")"
+TASK_LOOP_SCRIPT="$TASK_LOOP_DIR/scripts/task_loop.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -25,11 +24,11 @@ setup() {
     mkdir -p features/001-test/tasks
     mkdir -p .kilo/prompts
     
-    cat > .kilo/prompts/ralph-iterate.md << 'EOF'
+    cat > .kilo/prompts/task-iterate.md << 'EOF'
 Test prompt
 EOF
     
-    cat > .kilo/prompts/ralph-review.md << 'EOF'
+    cat > .kilo/prompts/task-review.md << 'EOF'
 Test review prompt
 EOF
     
@@ -133,7 +132,7 @@ EOF
     
     set +e
     local output
-    output=$(bash "$RALPH_LOOP_SCRIPT" --tasks-path features/001-test/tasks.md --max-iterations 1 --no-review 2>&1)
+    output=$(bash "$TASK_LOOP_SCRIPT" --tasks-path features/001-test/tasks.md --max-iterations 1 --no-review 2>&1)
     local exit_code=$?
     set -e
     
@@ -210,7 +209,7 @@ test_get_incomplete_count() {
 
 main() {
     echo "========================================"
-    echo "Integration Tests: ralph_loop.sh"
+    echo "Integration Tests: task_loop.sh"
     echo "========================================"
     echo ""
     

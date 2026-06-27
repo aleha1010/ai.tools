@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Helper functions for testing Ralph Loop
+# Helper functions for testing Task Loop
 # Этот файл source'ится из тестов и предоставляет доступ к функциям скрипта
 #
 
@@ -11,7 +11,6 @@ fi
 
 # Константы (должны совпадать с основным скриптом)
 readonly MAX_CONSECUTIVE_FAILURES=3
-readonly MAX_REVIEW_FAILURES=2
 readonly MAX_BACKOFF_SECONDS=60
 
 # DI для тестирования
@@ -148,7 +147,7 @@ EOF
         local iteration=$1
         local task_id=$2
         local pending_file=$3
-        local review_prompt_file="${REVIEW_PROMPT_FILE:-.kilo/prompts/ralph-review.md}"
+        local review_prompt_file="${REVIEW_PROMPT_FILE:-.kilo/prompts/task-review.md}"
         
         if [[ "${NO_REVIEW:-false}" == "true" ]]; then
             print_status "info" "Review gate отключён (--no-review)"
@@ -187,9 +186,9 @@ EOF
             
             local review_results_block=""
             review_results_block=$(echo "$review_output" | sed -n '/^REVIEW RESULTS:/,$p')
-            echo "$review_results_block" > "${PROJECT_ROOT}/.ralph_review_results.md"
+            echo "$review_results_block" > "${PROJECT_ROOT}/.task_loop_review_result.md"
             
-            local rejection_context_file="${PROJECT_ROOT}/.ralph_rejection_context.md"
+            local rejection_context_file="${PROJECT_ROOT}/.task_loop_rejection_context.md"
             local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
             
             cat > "$rejection_context_file" << REJECTION_CTX

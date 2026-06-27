@@ -9,7 +9,7 @@
 Репозиторий содержит переиспользуемые компоненты для AI-разработки:
 - **Agents** — определения агентов (wrapper для skills)
 - **Skills** — детальные инструкции и чеклисты для анализа
-- **Ralph Loop** — автономный TDD-оркестратор
+- **Task Loop** — автономный TDD-оркестратор
 
 ## Структура
 
@@ -17,7 +17,7 @@
 ai.tools/
 ├── agents/              # Определения агентов
 ├── skills/              # Переиспользуемые навыки
-└── ralph-loop/          # TDD-оркестратор
+└── task-loop/           # TDD-оркестратор
 ```
 
 ## Agents
@@ -65,14 +65,14 @@ Agents — это wrapper для вызова skills через Task tool.
 | `grill-me` | Интервью пользователя о плане/дизайне |
 | `handoff` | Создание handoff-документа для другого агента |
 
-## Ralph Loop
+## Task Loop
 
 Автономный TDD цикл с multi-agent review перед коммитом.
 
 ### Быстрый старт
 
 ```bash
-./ralph-loop/scripts/ralph_loop.sh --tasks-path specs/001-feature/tasks.md
+./task-loop/scripts/task_loop.sh --tasks-path specs/001-feature/tasks.md
 ```
 
 ### Фазы
@@ -99,7 +99,7 @@ Agents — это wrapper для вызова skills через Task tool.
 {"signal": "REVIEW_REJECTED", "reviewer": "security", "issues": ["SQL injection"]}
 ```
 
-Подробнее: [ralph-loop/README.md](ralph-loop/README.md)
+Подробнее: [task-loop/README.md](task-loop/README.md)
 
 ## Установка
 
@@ -115,11 +115,11 @@ Agents — это wrapper для вызова skills через Task tool.
 
 ### В проекте
 
-Скопируйте `ralph-loop/` в корень проекта:
+Скопируйте `task-loop/` в корень проекта:
 
 ```bash
-cp -r /Users/alexey/Workspace/ai.tools/ralph-loop ./
-./ralph-loop/scripts/ralph_loop.sh --tasks-path specs/001-feature/tasks.md
+cp -r /Users/alexey/Workspace/ai.tools/task-loop ./
+./task-loop/scripts/task_loop.sh --tasks-path specs/001-feature/tasks.md
 ```
 
 ## Использование
@@ -151,7 +151,7 @@ Prompt: Review implementation of GetParticipants method for SQL injection vulner
 | Зависимость | Версия | Назначение |
 |-------------|--------|------------|
 | `kilo` | any | AI agent CLI |
-| `jq` | >=1.6 | JSON parsing (Ralph Loop) |
+| `jq` | >=1.6 | JSON parsing (Task Loop) |
 | `git` | >=2.0 | Version control |
 
 ## Лицензия

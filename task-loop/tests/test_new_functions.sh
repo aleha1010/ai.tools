@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 #
-# Tests for new Ralph Loop functions (atomic_write, parse_frontmatter_decision, etc.)
-# Run: ./ralph-loop/tests/test_new_functions.sh
-#
+# Tests for new Task Loop functions (atomic_write, parse_frontmatter_decision, etc.)
+# Run: ./task-loop/tests/test_new_functions.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RALPH_LOOP_DIR="$(dirname "$SCRIPT_DIR")"
+TASK_LOOP_DIR="$(dirname "$SCRIPT_DIR")"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -535,7 +534,7 @@ STATE_JSON
 # =====================================================
 
 test_review_result_file_format() {
-    local review_file="$TEST_TMP_DIR/.ralph_review_result.md"
+    local review_file="$TEST_TMP_DIR/.task_loop_review_result.md"
     
     cat > "$review_file" << 'EOF'
 ---
@@ -579,10 +578,10 @@ test_file_paths_in_feature_dir() {
     local feature_dir="$TEST_TMP_DIR/specs/001-feature"
     mkdir -p "$feature_dir"
     
-    local log_file="$feature_dir/.ralph_loop.log"
-    local state_file="$feature_dir/.ralph_state.json"
-    local pending_file="$feature_dir/.ralph_pending_tasks.json"
-    local review_file="$feature_dir/.ralph_review_result.md"
+    local log_file="$feature_dir/.task_loop.log"
+    local state_file="$feature_dir/.task_loop_state.json"
+    local pending_file="$feature_dir/.task_loop_pending_tasks.json"
+    local review_file="$feature_dir/.task_loop_review_result.md"
     
     touch "$log_file" "$state_file" "$pending_file" "$review_file"
     
@@ -614,7 +613,7 @@ test_review_result_file_passed_to_prompt() {
     source_functions
     
     local prompt_file="$TEST_TMP_DIR/prompt.md"
-    local review_result_file="$TEST_TMP_DIR/.ralph_review_result.md"
+    local review_result_file="$TEST_TMP_DIR/.task_loop_review_result.md"
     
     cat > "$prompt_file" << 'EOF'
 Task: $TASKS_PATH
@@ -644,7 +643,7 @@ EOF
 test_rejected_task_continued_on_next_iteration() {
     source_functions
     
-    local state_file="$TEST_TMP_DIR/.ralph_state.json"
+    local state_file="$TEST_TMP_DIR/.task_loop_state.json"
     cat > "$state_file" << 'EOF'
 {
   "state": "REJECTED",
@@ -684,7 +683,7 @@ EOF
 test_rejected_task_missing_file_fallback() {
     source_functions
     
-    local state_file="$TEST_TMP_DIR/.ralph_state.json"
+    local state_file="$TEST_TMP_DIR/.task_loop_state.json"
     cat > "$state_file" << 'EOF'
 {
   "state": "REJECTED",
@@ -723,7 +722,7 @@ EOF
 test_corrupted_state_file_fallback() {
     source_functions
     
-    local state_file="$TEST_TMP_DIR/.ralph_state.json"
+    local state_file="$TEST_TMP_DIR/.task_loop_state.json"
     echo "{ invalid json }" > "$state_file"
     
     local next_task=""
@@ -747,7 +746,7 @@ test_corrupted_state_file_fallback() {
 test_load_state_restores_counters() {
     source_functions
     
-    local state_file="$TEST_TMP_DIR/.ralph_state.json"
+    local state_file="$TEST_TMP_DIR/.task_loop_state.json"
     cat > "$state_file" << 'EOF'
 {
   "state": "REJECTED",
@@ -756,7 +755,6 @@ test_load_state_restores_counters() {
   "timestamp": "2026-06-26T12:00:00Z",
   "pid": 12345,
   "review_retries": 1,
-  "review_failures": 1,
   "tasks_completed": 2,
   "total_attempts": 15,
   "failed_tasks": ["T001"],
@@ -769,7 +767,7 @@ EOF
     
     local STATE_FILE="$state_file"
     local iteration=0 tasks_completed=0 consecutive_failures=0
-    local review_retries=0 review_failures=0 total_attempts=0
+    local review_retries=0 total_attempts=0
     local failed_tasks="[]" task_rejection_counts="{}"
     local impl_failures=0 infra_failures=0
     
@@ -777,12 +775,12 @@ EOF
     iteration=$(jq -r '.iteration // 0' "$STATE_FILE") && \
     tasks_completed=$(jq -r '.tasks_completed // 0' "$STATE_FILE") && \
     consecutive_failures=$(jq -r '.consecutive_failures // 0' "$STATE_FILE") && \
-    review_failures=$(jq -r '.review_failures // 0' "$STATE_FILE") && \
+    review_retries=$(jq -r '.review_retries // 0' "$STATE_FILE") && \
     total_attempts=$(jq -r '.total_attempts // 0' "$STATE_FILE") && \
     impl_failures=$(jq -r '.impl_failures // 0' "$STATE_FILE") && \
     infra_failures=$(jq -r '.infra_failures // 0' "$STATE_FILE")
     
-    if [[ "$iteration" -eq 7 && "$tasks_completed" -eq 2 && "$consecutive_failures" -eq 1 && "$review_failures" -eq 1 && "$impl_failures" -eq 0 && "$infra_failures" -eq 1 ]]; then
+    if [[ "$iteration" -eq 7 && "$tasks_completed" -eq 2 && "$consecutive_failures" -eq 1 && "$review_retries" -eq 1 && "$impl_failures" -eq 0 && "$infra_failures" -eq 1 ]]; then
         return 0
     else
         echo "Counters not restored: iter=$iteration, tasks=$tasks_completed, fail=$consecutive_failures" >&2
@@ -880,7 +878,7 @@ EOF
 
 main() {
     echo "========================================"
-    echo "Ralph Loop New Functions Test Suite"
+    echo "Task Loop New Functions Test Suite"
     echo "========================================"
     echo ""
     
