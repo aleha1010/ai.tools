@@ -27,6 +27,7 @@ set -euo pipefail
 #region Константы
 readonly MAX_CONSECUTIVE_FAILURES=3
 readonly MAX_REVIEW_FAILURES=2
+readonly MAX_TASK_REJECTIONS=3
 readonly MAX_BACKOFF_SECONDS=60
 readonly MAX_TOTAL_ATTEMPTS_MULTIPLIER=10
 readonly DEFAULT_MAX_ITERATIONS=50
@@ -42,13 +43,13 @@ NO_REVIEW=false
 NO_COMMIT=false
 WORKING_DIRECTORY=""
 PROJECT_ROOT=""
+FORCE_LOCK=false
 PROMPT_FILE=".kilo/prompts/ralph-iterate.md"
 REVIEW_PROMPT_FILE=".kilo/prompts/ralph-review.md"
 LOCK_FILE="/tmp/ralph_loop_${USER}.lock"
 LOG_FILE=""
 STATE_FILE=""
 PENDING_TASKS_FILE=""
-STATUS_CACHE_FILE=""
 FRONTMATTER_CACHE_FILE=""
 REVIEW_RESULT_FILE=""
 
@@ -59,45 +60,25 @@ SLEEP_CMD="${SLEEP_CMD:-sleep}"
 #endregion
 
 #region Функции для работы с dependencies
-build_task_status_cache() {
-    local tasks_file="$1"
-    local cache_file="$2"
-    
-    > "$cache_file"
-    
-    while IFS= read -r line; do
-        if echo "$line" | grep -qE '^\s*-\s*\[([x ])\]\s+T[0-9]+'; then
-            local task_id=$(echo "$line" | grep -oE 'T[0-9]+' | head -1)
-            local bracket=$(echo "$line" | grep -oE '\[([x ])\]')
-            local task_status=$(echo "$bracket" | sed 's/\[\(.\)\]/\1/')
-            echo "${task_id}=${task_status}" >> "$cache_file"
-        fi
-    done < "$tasks_file"
-}
-
-get_task_status() {
-    local task_id="$1"
-    local cache_file="$2"
-    
-    grep "^${task_id}=" "$cache_file" 2>/dev/null | cut -d'=' -f2 || echo ""
-}
-
-parse_frontmatter_cached() {
+parse_frontmatter_deps() {
     local task_file="$1"
-    local cache_file="$2"
     
-    if [[ -f "$cache_file" ]]; then
-        cat "$cache_file"
-        return
+    if [[ ! -f "$task_file" ]]; then
+        echo ""
+        return 1
     fi
     
-    local deps=""
-    if [[ -f "$task_file" ]]; then
-        deps=$(grep '^dependencies:' "$task_file" 2>/dev/null | sed -n 's/^dependencies: \[\(.*\)\]/\1/p' | tr -d ' ' | tr ',' '\n' | grep -E '^T[0-9]+$' || echo "")
-    fi
+    grep '^dependencies:' "$task_file" 2>/dev/null | \
+        sed -n 's/^dependencies: \[\(.*\)\]/\1/p' | \
+        tr -d ' ' | tr ',' '\n' | \
+        grep -E '^T[0-9]+$' || echo ""
+}
+
+is_task_completed() {
+    local task_id="$1"
+    local tasks_file="$2"
     
-    echo "$deps" > "$cache_file"
-    echo "$deps"
+    grep -qE "^\s*-\s*\[x\]\s+${task_id}" "$tasks_file" 2>/dev/null
 }
 
 atomic_write() {
@@ -115,16 +96,15 @@ atomic_write() {
 
 check_dependencies() {
     local task_file="$1"
-    local status_cache="$2"
-    local frontmatter_cache="$3"
+    local tasks_file="$2"
     
     local deps
-    deps=$(parse_frontmatter_cached "$task_file" "$frontmatter_cache")
+    deps=$(parse_frontmatter_deps "$task_file")
     
     [[ -z "$deps" ]] && return 0
     
     for dep in $deps; do
-        if [[ "$(get_task_status "$dep" "$status_cache")" != "x" ]]; then
+        if ! is_task_completed "$dep" "$tasks_file"; then
             return 1
         fi
     done
@@ -147,7 +127,90 @@ validate_tasks_integrity() {
         fi
     done < "$tasks_file"
     
+    if [[ -d "$tasks_dir" ]]; then
+        detect_dependency_cycles "$tasks_file" "$tasks_dir"
+        local cycle_result=$?
+        if [[ $cycle_result -ne 0 ]]; then
+            ((errors++))
+        fi
+    fi
+    
     return $errors
+}
+
+detect_dependency_cycles() {
+    local tasks_file="$1"
+    local tasks_dir="$2"
+    
+    local dep_graph_file
+    dep_graph_file=$(mktemp)
+    
+    while IFS= read -r line; do
+        if [[ $line =~ ^-\ \[\ \]\ .*(T[0-9]+) ]]; then
+            local task_id="${BASH_REMATCH[1]}"
+            local task_file="$tasks_dir/${task_id}.md"
+            
+            if [[ -f "$task_file" ]]; then
+                local deps
+                deps=$(parse_frontmatter_deps "$task_file")
+                if [[ -n "$deps" ]]; then
+                    for dep in $deps; do
+                        echo "${task_id} ${dep}" >> "$dep_graph_file"
+                    done
+                fi
+            fi
+        fi
+    done < "$tasks_file"
+    
+    local all_task_ids
+    all_task_ids=$(grep -oE 'T[0-9]+' "$dep_graph_file" 2>/dev/null | sort -u || echo "")
+    
+    local visited_list=""
+    local visiting_list=""
+    local cycle_found=0
+    
+    _check_cycle() {
+        local task="$1"
+        local path="$2"
+        
+        if echo " $visiting_list " | grep -q " $task "; then
+            print_status "error" "Cyclic dependency detected: $path -> $task"
+            return 1
+        fi
+        
+        if echo " $visited_list " | grep -q " $task "; then
+            return 0
+        fi
+        
+        visiting_list="$visiting_list $task"
+        
+        local deps
+        deps=$(grep "^${task} " "$dep_graph_file" 2>/dev/null | awk '{print $2}' || echo "")
+        
+        if [[ -n "$deps" ]]; then
+            for dep in $deps; do
+                if ! _check_cycle "$dep" "$path -> $task"; then
+                    return 1
+                fi
+            done
+        fi
+        
+        visiting_list=$(echo " $visiting_list " | sed "s/ $task / /" | sed 's/^ //;s/ $//')
+        visited_list="$visited_list $task"
+        return 0
+    }
+    
+    for tid in $all_task_ids; do
+        if ! echo " $visited_list " | grep -q " $tid "; then
+            if ! _check_cycle "$tid" ""; then
+                cycle_found=1
+                break
+            fi
+        fi
+    done
+    
+    rm -f "$dep_graph_file"
+    return $cycle_found
 }
 #endregion
 
@@ -239,6 +302,10 @@ parse_args() {
                 NO_COMMIT=true
                 shift
                 ;;
+            --force)
+                FORCE_LOCK=true
+                shift
+                ;;
             --working-directory)
                 if [[ -z "${2:-}" ]]; then
                     echo "Ошибка: --working-directory требует значение" >&2
@@ -248,7 +315,7 @@ parse_args() {
                 shift 2
                 ;;
             --help|-h)
-                echo "Использование: $0 --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--no-commit] [--working-directory DIR]"
+                echo "Использование: $0 --tasks-path PATH [--max-iterations N] [--verbose] [--no-review] [--no-commit] [--force] [--working-directory DIR]"
                 echo ""
                 echo "Параметры:"
                 echo "  --tasks-path PATH        Путь к tasks.md (обязательно)"
@@ -256,6 +323,7 @@ parse_args() {
                 echo "  --verbose                Подробный вывод"
                 echo "  --no-review              Отключить review gate"
                 echo "  --no-commit              Отключить git commit"
+                echo "  --force                  Удалить stale lock file и продолжить"
                 echo "  --working-directory DIR  Рабочая директория"
                 return 0
                 ;;
@@ -324,27 +392,22 @@ get_first_incomplete_task() {
 get_next_executable_task() {
     local tasks_file="$1"
     local tasks_dir="$2"
-    local status_cache="$3"
     
     while IFS= read -r line; do
         if echo "$line" | grep -qE '^\s*-\s*\[ \]\s+[A-Z0-9-]+'; then
             local task_id=$(echo "$line" | grep -oE '[A-Z]+-[0-9]+|T[0-9]+' | head -1)
             
             local task_file="$tasks_dir/${task_id}.md"
-            local frontmatter_cache="/tmp/.frontmatter_${task_id}_$$"
             
             if [[ ! -f "$task_file" ]]; then
                 print_status "failure" "Файл задачи не найден: $task_file"
                 continue
             fi
             
-            if check_dependencies "$task_file" "$status_cache" "$frontmatter_cache"; then
-                rm -f "$frontmatter_cache"
+            if check_dependencies "$task_file" "$tasks_file"; then
                 echo "$task_id"
                 return 0
             fi
-            
-            rm -f "$frontmatter_cache"
         fi
     done < "$tasks_file"
     
@@ -424,7 +487,7 @@ save_state() {
     local iteration="$2"
     local current_task="$3"
     
-    cat > "$STATE_FILE" << STATE_JSON
+    local json_content=$(cat << STATE_JSON
 {
   "state": "$state",
   "iteration": $iteration,
@@ -432,10 +495,71 @@ save_state() {
   "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
   "pid": $$,
   "review_retries": ${review_retries:-0},
+  "review_failures": ${review_failures:-0},
+  "tasks_completed": ${tasks_completed:-0},
+  "total_attempts": ${total_attempts:-0},
   "failed_tasks": $(echo "${failed_tasks:-[]}" | jq -c . 2>/dev/null || echo "[]"),
-  "consecutive_failures": ${consecutive_failures:-0}
+  "consecutive_failures": ${consecutive_failures:-0},
+  "impl_failures": ${impl_failures:-0},
+  "infra_failures": ${infra_failures:-0},
+  "task_rejection_counts": $(echo "${task_rejection_counts:-{}}" | jq -c . 2>/dev/null || echo "{}")
 }
 STATE_JSON
+)
+    printf '%s\n' "$json_content" > "${STATE_FILE}.tmp.$$" && mv "${STATE_FILE}.tmp.$$" "$STATE_FILE"
+}
+
+load_state() {
+    if [[ ! -f "$STATE_FILE" ]]; then
+        return 0
+    fi
+    
+    if ! jq -e . "$STATE_FILE" >/dev/null 2>&1; then
+        print_status "warning" "State file повреждён, запуск с чистого состояния"
+        return 0
+    fi
+    
+    local saved_state
+    saved_state=$(jq -r '.state // empty' "$STATE_FILE" 2>/dev/null)
+    local saved_iteration
+    saved_iteration=$(jq -r '.iteration // 0' "$STATE_FILE" 2>/dev/null)
+    local saved_review_retries
+    saved_review_retries=$(jq -r '.review_retries // 0' "$STATE_FILE" 2>/dev/null)
+    local saved_review_failures
+    saved_review_failures=$(jq -r '.review_failures // 0' "$STATE_FILE" 2>/dev/null)
+    local saved_tasks_completed
+    saved_tasks_completed=$(jq -r '.tasks_completed // 0' "$STATE_FILE" 2>/dev/null)
+    local saved_total_attempts
+    saved_total_attempts=$(jq -r '.total_attempts // 0' "$STATE_FILE" 2>/dev/null)
+    local saved_consecutive_failures
+    saved_consecutive_failures=$(jq -r '.consecutive_failures // 0' "$STATE_FILE" 2>/dev/null)
+    local saved_impl_failures
+    saved_impl_failures=$(jq -r '.impl_failures // 0' "$STATE_FILE" 2>/dev/null)
+    local saved_infra_failures
+    saved_infra_failures=$(jq -r '.infra_failures // 0' "$STATE_FILE" 2>/dev/null)
+    local saved_failed_tasks
+    saved_failed_tasks=$(jq -r '.failed_tasks // []' "$STATE_FILE" 2>/dev/null)
+    local saved_rejection_counts
+    saved_rejection_counts=$(jq -r '.task_rejection_counts // {}' "$STATE_FILE" 2>/dev/null)
+    
+    iteration=${saved_iteration:-0}
+    review_retries=${saved_review_retries:-0}
+    review_failures=${saved_review_failures:-0}
+    tasks_completed=${saved_tasks_completed:-0}
+    total_attempts=${saved_total_attempts:-0}
+    consecutive_failures=${saved_consecutive_failures:-0}
+    impl_failures=${saved_impl_failures:-0}
+    infra_failures=${saved_infra_failures:-0}
+    failed_tasks="${saved_failed_tasks:-[]}"
+    task_rejection_counts="${saved_rejection_counts:-{}}"
+    
+    print_status "info" "Восстановление состояния: iteration=$iteration, tasks_completed=$tasks_completed, consecutive_failures=$consecutive_failures"
+    
+    if [[ "$saved_state" == "REJECTED" ]]; then
+        print_status "info" "Предыдущая задача была REJECTED — будет продолжена"
+    elif [[ "$saved_state" == "FAILED" ]]; then
+        print_status "warning" "Предыдущая итерация завершилась с ошибкой"
+    fi
 }
 #endregion
 
@@ -587,7 +711,6 @@ migrate_old_files() {
         ".ralph_pending_tasks.json"
         ".ralph_rejection_context.md"
         ".ralph_review_results.md"
-        ".ralph_status_cache"
         ".ralph_frontmatter_cache"
     )
     
@@ -607,6 +730,54 @@ migrate_old_files() {
     if [[ $migrated -gt 0 ]]; then
         print_status "success" "Migrated $migrated file(s) to new format"
     fi
+}
+#endregion
+
+#region Функции automated test gate
+run_test_gate() {
+    local project_root="$1"
+    
+    local test_cmd=""
+    local test_desc=""
+    
+    if [[ -f "$project_root/package.json" ]]; then
+        if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
+            test_cmd="npm test"
+            test_desc="npm test"
+        fi
+    elif [[ -n "$(find "$project_root" -maxdepth 2 -name "*.csproj" -print -quit 2>/dev/null)" ]]; then
+        test_cmd="dotnet test --no-build 2>/dev/null || dotnet test"
+        test_desc="dotnet test"
+    elif [[ -f "$project_root/pytest.ini" ]] || [[ -f "$project_root/setup.py" ]] || [[ -n "$(find "$project_root" -maxdepth 2 -name 'conftest.py' -print -quit 2>/dev/null)" ]]; then
+        test_cmd="pytest"
+        test_desc="pytest"
+    elif [[ -f "$project_root/Cargo.toml" ]]; then
+        test_cmd="cargo test"
+        test_desc="cargo test"
+    elif [[ -f "$project_root/go.mod" ]]; then
+        test_cmd="go test ./..."
+        test_desc="go test"
+    fi
+    
+    if [[ -z "$test_cmd" ]]; then
+        print_status "info" "Test gate: тип проекта не определён, тесты пропущены"
+        return 0
+    fi
+    
+    print_phase "TEST GATE" "Запуск: $test_desc"
+    
+    set +e
+    eval "$test_cmd" 2>&1
+    local test_exit_code=$?
+    set -e
+    
+    if [[ $test_exit_code -ne 0 ]]; then
+        print_status "error" "Тесты не прошли (exit code: $test_exit_code)"
+        return 1
+    fi
+    
+    print_status "success" "Тесты прошли ($test_desc)"
+    return 0
 }
 #endregion
 
@@ -654,7 +825,7 @@ main() {
     fi
     
     if [[ "$NO_REVIEW" != "true" ]]; then
-        REVIEW_PROMPT_FILE="${PROJECT_ROOT}/.kilo/prompts/ralph-review.md"
+        REVIEW_PROMPT_FILE="${PROJECT_ROOT}/${REVIEW_PROMPT_FILE}"
         if [[ ! -f "$REVIEW_PROMPT_FILE" ]]; then
             echo "⚠️  Предупреждение: Prompt для review не найден: $REVIEW_PROMPT_FILE" >&2
         fi
@@ -663,15 +834,23 @@ main() {
     if [[ -f "$LOCK_FILE" ]]; then
         local lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
         if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
-            echo "Ошибка: Другой экземпляр уже запущен (PID: $lock_pid)" >&2
-            exit 1
+            if [[ "$FORCE_LOCK" == "true" ]]; then
+                echo "⚠️  --force: удаляю lock file (PID: $lock_pid)" >&2
+                rm -f "$LOCK_FILE"
+            else
+                echo "Ошибка: Другой экземпляр уже запущен (PID: $lock_pid)" >&2
+                echo "Используйте --force для принудительного запуска" >&2
+                exit 1
+            fi
+        else
+            rm -f "$LOCK_FILE"
         fi
     fi
     echo $$ > "$LOCK_FILE"
 
     # Save original file descriptors for proper tee cleanup
     exec 3>&1 4>&2
-    trap 'exec 1>&3 2>&4; wait $TEE_PID 2>/dev/null; rm -f "$LOCK_FILE"' EXIT
+    trap 'exec 1>&3 2>&4; wait $TEE_PID 2>/dev/null || true; rm -f "$LOCK_FILE"' EXIT
     
     local FEATURE_NAME=$(extract_feature_name "$TASKS_PATH")
     local FEATURE_DIR=$(dirname "$TASKS_PATH")
@@ -680,7 +859,6 @@ main() {
     LOG_FILE="${FEATURE_DIR}/.ralph_loop.log"
     STATE_FILE="${FEATURE_DIR}/.ralph_state.json"
     PENDING_TASKS_FILE="${FEATURE_DIR}/.ralph_pending_tasks.json"
-    STATUS_CACHE_FILE="${FEATURE_DIR}/.ralph_status_cache"
     FRONTMATTER_CACHE_FILE="${FEATURE_DIR}/.ralph_frontmatter_cache"
     REVIEW_RESULT_FILE="${FEATURE_DIR}/.ralph_review_result.md"
     
@@ -708,13 +886,16 @@ main() {
     local iteration=0
     local tasks_completed=0
     local consecutive_failures=0
+    local impl_failures=0
+    local infra_failures=0
     local review_retries=0
     local review_failures=0
     local total_attempts=0
     local failed_tasks="[]"
+    local task_rejection_counts="{}"
     local max_total_attempts=$((MAX_ITERATIONS * MAX_TOTAL_ATTEMPTS_MULTIPLIER))
     
-    build_task_status_cache "$TASKS_PATH" "$STATUS_CACHE_FILE"
+    load_state
     
     while [[ $total_attempts -lt $max_total_attempts ]]; do
         ((total_attempts++))
@@ -722,20 +903,47 @@ main() {
         
         local next_task=""
         
-        if [[ -d "$TASKS_DIR" ]]; then
-            next_task=$(get_next_executable_task "$TASKS_PATH" "$TASKS_DIR" "$STATUS_CACHE_FILE")
+        # Check if previous iteration was REJECTED - continue with same task
+        if [[ -f "$STATE_FILE" ]] && jq -e . "$STATE_FILE" >/dev/null 2>&1; then
+            local prev_state=$(jq -r '.state // empty' "$STATE_FILE" 2>/dev/null)
+            local prev_task=$(jq -r '.current_task // empty' "$STATE_FILE" 2>/dev/null)
             
-            if [[ -z "$next_task" ]]; then
-                local incomplete=$(get_incomplete_task_count "$TASKS_PATH")
-                if [[ $incomplete -gt 0 ]]; then
-                    print_status "error" "Все оставшиеся задачи заблокированы невыполненными dependencies"
-                    print_status "info" "Невыполненных задач: $incomplete"
-                    print_summary "$tasks_completed" "ALL_BLOCKED" "$total_attempts"
-                    exit 1
+            if [[ "$prev_state" == "REJECTED" && -n "$prev_task" ]]; then
+                # Verify task file still exists before continuing
+                local task_file_to_check=""
+                if [[ -d "$TASKS_DIR" ]]; then
+                    task_file_to_check="${TASKS_DIR}/${prev_task}.md"
+                else
+                    task_file_to_check="$TASKS_PATH"
+                fi
+                
+                if [[ -f "$task_file_to_check" ]]; then
+                    print_status "info" "Продолжение работы над отклонённой задачей: $prev_task"
+                    next_task="$prev_task"
+                else
+                    print_status "warning" "Task file для REJECTED задачи не найден: $task_file_to_check"
+                    print_status "info" "Fallback к нормальному выбору задачи"
                 fi
             fi
-        else
-            next_task=$(get_first_incomplete_task "$TASKS_PATH")
+        fi
+        
+        # Normal task selection if not REJECTED continuation
+        if [[ -z "$next_task" ]]; then
+            if [[ -d "$TASKS_DIR" ]]; then
+                next_task=$(get_next_executable_task "$TASKS_PATH" "$TASKS_DIR")
+                
+                if [[ -z "$next_task" ]]; then
+                    local incomplete=$(get_incomplete_task_count "$TASKS_PATH")
+                    if [[ $incomplete -gt 0 ]]; then
+                        print_status "error" "Все оставшиеся задачи заблокированы невыполненными dependencies"
+                        print_status "info" "Невыполненных задач: $incomplete"
+                        print_summary "$tasks_completed" "ALL_BLOCKED" "$total_attempts"
+                        exit 1
+                    fi
+                fi
+            else
+                next_task=$(get_first_incomplete_task "$TASKS_PATH")
+            fi
         fi
         
         if [[ -z "$next_task" ]]; then
@@ -765,10 +973,12 @@ main() {
         local safe_task_path=$(printf '%q' "$TASK_FILE_PATH")
         local safe_pending_path=$(printf '%q' "$PENDING_TASKS_FILE")
         local safe_feature_dir=$(printf '%q' "$FEATURE_DIR")
+        local safe_review_result=$(printf '%s' "$REVIEW_RESULT_FILE" | sed 's/[&/\]/\\&/g')
 
         local PROMPT=$(sed "s|\$TASKS_PATH|$safe_task_path|g" "$PROMPT_FILE")
         PROMPT=$(sed "s|\$PENDING_TASKS_FILE|$safe_pending_path|g" <<< "$PROMPT")
         PROMPT=$(sed "s|\$FEATURE_DIR|$safe_feature_dir|g" <<< "$PROMPT")
+        PROMPT=$(sed "s|\$REVIEW_RESULT_FILE|$safe_review_result|g" <<< "$PROMPT")
         PROMPT=$(printf '%s' "$PROMPT")
         
         set +e
@@ -814,13 +1024,14 @@ main() {
             print_status "error" "Итерация $iteration: реализация не удалась для задачи $next_task"
             
             local failure_result
-            failure_result=$(handle_failure "реализации" "$consecutive_failures" "$MAX_CONSECUTIVE_FAILURES" "CIRCUIT_BREAKER")
+            failure_result=$(handle_failure "реализации" "$impl_failures" "$MAX_CONSECUTIVE_FAILURES" "CIRCUIT_BREAKER")
             
             if [[ "$failure_result" == "CIRCUIT_BREAKER" ]]; then
                 exit 1
             fi
             
-            consecutive_failures="$failure_result"
+            impl_failures="$failure_result"
+            consecutive_failures="$impl_failures"
             
             if [[ $iteration -ge $MAX_ITERATIONS ]]; then
                 print_status "error" "Достигнут максимум итераций"
@@ -831,7 +1042,28 @@ main() {
             continue
         fi
         
-        consecutive_failures=0
+        impl_failures=0
+        
+        # =====================================================
+        # TEST GATE: Автоматический запуск тестов
+        # =====================================================
+        
+        if ! run_test_gate "$PROJECT_ROOT"; then
+            print_status "error" "Test gate не пройден для задачи $next_task"
+            save_state "TEST_FAILED" "$iteration" "$next_task"
+            ((iteration++))
+            
+            local failure_result
+            failure_result=$(handle_failure "тестов" "$impl_failures" "$MAX_CONSECUTIVE_FAILURES" "TEST_FAILURES")
+            
+            if [[ "$failure_result" == "CIRCUIT_BREAKER" ]]; then
+                exit 1
+            fi
+            
+            impl_failures="$failure_result"
+            consecutive_failures="$impl_failures"
+            continue
+        fi
         
         # =====================================================
         # ФАЗА 2: Review Gate
@@ -867,19 +1099,36 @@ main() {
             ((iteration++))
             
             local failure_result
-            failure_result=$(handle_failure "Kilo ошибки" "$consecutive_failures" "$MAX_CONSECUTIVE_FAILURES" "KILO_ERRORS")
+            failure_result=$(handle_failure "Kilo ошибки" "$infra_failures" "$MAX_CONSECUTIVE_FAILURES" "KILO_ERRORS")
             
             if [[ "$failure_result" == "CIRCUIT_BREAKER" ]]; then
+                print_status "error" "Инфраструктурные ошибки — возможно kilo недоступен"
+                create_escalation_for_review_failure "$pending_task_id"
                 exit 1
             fi
             
-            consecutive_failures="$failure_result"
+            infra_failures="$failure_result"
+            consecutive_failures="$infra_failures"
             continue
             
         elif [[ $review_result -eq 1 ]]; then
             ((review_failures++))
             ((iteration++))
             print_status "failure" "Неудача review $review_failures/$MAX_REVIEW_FAILURES (итерация $iteration)"
+            
+            local current_rejections
+            current_rejections=$(echo "$task_rejection_counts" | jq -r --arg t "$pending_task_id" '.[$t] // 0' 2>/dev/null || echo "0")
+            ((current_rejections++))
+            task_rejection_counts=$(echo "$task_rejection_counts" | jq --arg t "$pending_task_id" --argjson c "$current_rejections" '.[$t] = $c' 2>/dev/null || echo "{}")
+            
+            print_status "info" "Задача $pending_task_id отклонена $current_rejections/$MAX_TASK_REJECTIONS раз"
+            
+            if [[ $current_rejections -ge $MAX_TASK_REJECTIONS ]]; then
+                print_status "error" "Задача $pending_task_id отклонена $MAX_TASK_REJECTIONS раз — escalation"
+                create_escalation_for_review_failure "$pending_task_id"
+                print_summary "$tasks_completed" "TASK_REJECTION_LIMIT" "$total_attempts"
+                exit 1
+            fi
             
             if [[ $review_failures -ge $MAX_REVIEW_FAILURES ]]; then
                 print_status "error" "Слишком много неудач review"
@@ -902,11 +1151,10 @@ main() {
         # =====================================================
         
         review_failures=0
+        task_rejection_counts=$(echo "$task_rejection_counts" | jq --arg t "$pending_task_id" 'del(.[$t])' 2>/dev/null || echo "{}")
         save_state "COMMITTING" "$iteration" "$pending_task_id"
         
         mark_task_completed "$TASKS_PATH" "$pending_task_id"
-        
-        build_task_status_cache "$TASKS_PATH" "$STATUS_CACHE_FILE"
         
         if [[ "$NO_COMMIT" != "true" ]]; then
             do_commit "$FEATURE_NAME" "$pending_task_id" "$iteration"

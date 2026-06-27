@@ -91,27 +91,25 @@ source_functions() {
         ((consecutive_failures++))
     }
     
-    get_task_status() {
+    is_task_completed() {
         local task_id="$1"
-        local cache_file="$2"
+        local tasks_file="$2"
         
-        grep "^${task_id}=" "$cache_file" 2>/dev/null | cut -d'=' -f2 || echo ""
+        grep -qE "^\s*-\s*\[x\]\s+${task_id}" "$tasks_file" 2>/dev/null
     }
     
-    build_task_status_cache() {
-        local tasks_file="$1"
-        local cache_file="$2"
+    parse_frontmatter_deps() {
+        local task_file="$1"
         
-        > "$cache_file"
+        if [[ ! -f "$task_file" ]]; then
+            echo ""
+            return 1
+        fi
         
-        while IFS= read -r line; do
-            if echo "$line" | grep -qE '^\s*-\s*\[([x ])\]\s+T[0-9]+'; then
-                local task_id=$(echo "$line" | grep -oE 'T[0-9]+' | head -1)
-                local bracket=$(echo "$line" | grep -oE '\[([x ])\]')
-                local task_status=$(echo "$bracket" | sed 's/\[\(.\)\]/\1/')
-                echo "${task_id}=${task_status}" >> "$cache_file"
-            fi
-        done < "$tasks_file"
+        grep '^dependencies:' "$task_file" 2>/dev/null | \
+            sed -n 's/^dependencies: \[\(.*\)\]/\1/p' | \
+            tr -d ' ' | tr ',' '\n' | \
+            grep -E '^T[0-9]+$' || echo ""
     }
 }
 
@@ -401,10 +399,10 @@ test_mark_task_failed_appends_to_array() {
 }
 
 # =====================================================
-# Tests: build_task_status_cache
+# Tests: is_task_completed / parse_frontmatter_deps
 # =====================================================
 
-test_build_cache_creates_entries() {
+test_is_task_completed_returns_true_for_done() {
     source_functions
     
     local tasks_file="$TEST_TMP_DIR/tasks.md"
@@ -416,42 +414,74 @@ test_build_cache_creates_entries() {
 - [ ] T003: Third task
 EOF
     
-    local cache_file="$TEST_TMP_DIR/cache.txt"
-    build_task_status_cache "$tasks_file" "$cache_file"
-    
-    if [[ -f "$cache_file" ]]; then
-        local t001_status
-        t001_status=$(get_task_status "T001" "$cache_file")
-        local t002_status
-        t002_status=$(get_task_status "T002" "$cache_file")
-        local t003_status
-        t003_status=$(get_task_status "T003" "$cache_file")
-        
-        if [[ "$t001_status" == " " && "$t002_status" == "x" && "$t003_status" == " " ]]; then
-            return 0
-        else
-            echo "Cache entries incorrect: T001='$t001_status', T002='$t002_status', T003='$t003_status'" >&2
-            return 1
-        fi
+    if is_task_completed "T002" "$tasks_file"; then
+        return 0
     else
-        echo "Cache file should be created" >&2
+        echo "T002 should be completed" >&2
         return 1
     fi
 }
 
-test_get_task_status_returns_empty_for_missing() {
+test_is_task_completed_returns_false_for_incomplete() {
     source_functions
     
-    local cache_file="$TEST_TMP_DIR/cache.txt"
-    echo "T001=x" > "$cache_file"
+    local tasks_file="$TEST_TMP_DIR/tasks.md"
+    cat > "$tasks_file" << 'EOF'
+# Tasks
+
+- [ ] T001: First task
+- [x] T002: Completed task
+EOF
+    
+    if is_task_completed "T001" "$tasks_file"; then
+        echo "T001 should NOT be completed" >&2
+        return 1
+    else
+        return 0
+    fi
+}
+
+test_parse_frontmatter_deps_extracts_deps() {
+    source_functions
+    
+    local task_file="$TEST_TMP_DIR/T001.md"
+    cat > "$task_file" << 'EOF'
+---
+id: T001
+dependencies: [T000, T002]
+---
+# T001: Task
+EOF
     
     local result
-    result=$(get_task_status "T999" "$cache_file")
+    result=$(parse_frontmatter_deps "$task_file")
+    
+    if echo "$result" | grep -q "T000" && echo "$result" | grep -q "T002"; then
+        return 0
+    else
+        echo "Expected T000 and T002, got: $result" >&2
+        return 1
+    fi
+}
+
+test_parse_frontmatter_deps_returns_empty_for_no_deps() {
+    source_functions
+    
+    local task_file="$TEST_TMP_DIR/T001.md"
+    cat > "$task_file" << 'EOF'
+---
+id: T001
+---
+# T001: Task
+EOF
+    
+    local result
+    result=$(parse_frontmatter_deps "$task_file")
     
     if [[ -z "$result" ]]; then
         return 0
     else
-        echo "Expected empty for missing task, got '$result'" >&2
+        echo "Expected empty for no deps, got: $result" >&2
         return 1
     fi
 }
@@ -577,6 +607,274 @@ test_file_paths_in_feature_dir() {
 }
 
 # =====================================================
+# Tests: REJECTED flow
+# =====================================================
+
+test_review_result_file_passed_to_prompt() {
+    source_functions
+    
+    local prompt_file="$TEST_TMP_DIR/prompt.md"
+    local review_result_file="$TEST_TMP_DIR/.ralph_review_result.md"
+    
+    cat > "$prompt_file" << 'EOF'
+Task: $TASKS_PATH
+Review: $REVIEW_RESULT_FILE
+EOF
+    
+    cat > "$review_result_file" << 'EOF'
+---
+decision: REJECTED
+task_id: T002
+---
+# Review Results
+EOF
+    
+    local safe_review_result=$(printf '%s' "$review_result_file" | sed 's/[&/\]/\\&/g')
+    local prompt=$(sed "s|\$REVIEW_RESULT_FILE|$safe_review_result|g" "$prompt_file")
+    
+    if [[ "$prompt" == *"Review: $review_result_file"* ]]; then
+        return 0
+    else
+        echo "REVIEW_RESULT_FILE should be substituted in prompt" >&2
+        echo "Got: $prompt" >&2
+        return 1
+    fi
+}
+
+test_rejected_task_continued_on_next_iteration() {
+    source_functions
+    
+    local state_file="$TEST_TMP_DIR/.ralph_state.json"
+    cat > "$state_file" << 'EOF'
+{
+  "state": "REJECTED",
+  "iteration": 5,
+  "current_task": "T002",
+  "timestamp": "2026-06-26T12:00:00Z"
+}
+EOF
+    
+    local tasks_dir="$TEST_TMP_DIR/tasks"
+    mkdir -p "$tasks_dir"
+    echo "# T002" > "$tasks_dir/T002.md"
+    
+    local next_task=""
+    
+    if [[ -f "$state_file" ]] && jq -e . "$state_file" >/dev/null 2>&1; then
+        local prev_state=$(jq -r '.state // empty' "$state_file" 2>/dev/null)
+        local prev_task=$(jq -r '.current_task // empty' "$state_file" 2>/dev/null)
+        
+        if [[ "$prev_state" == "REJECTED" && -n "$prev_task" ]]; then
+            local task_file_to_check="${tasks_dir}/${prev_task}.md"
+            
+            if [[ -f "$task_file_to_check" ]]; then
+                next_task="$prev_task"
+            fi
+        fi
+    fi
+    
+    if [[ "$next_task" == "T002" ]]; then
+        return 0
+    else
+        echo "REJECTED task T002 should be selected, got: $next_task" >&2
+        return 1
+    fi
+}
+
+test_rejected_task_missing_file_fallback() {
+    source_functions
+    
+    local state_file="$TEST_TMP_DIR/.ralph_state.json"
+    cat > "$state_file" << 'EOF'
+{
+  "state": "REJECTED",
+  "iteration": 5,
+  "current_task": "T999",
+  "timestamp": "2026-06-26T12:00:00Z"
+}
+EOF
+    
+    local tasks_dir="$TEST_TMP_DIR/tasks"
+    mkdir -p "$tasks_dir"
+    
+    local next_task=""
+    
+    if [[ -f "$state_file" ]] && jq -e . "$state_file" >/dev/null 2>&1; then
+        local prev_state=$(jq -r '.state // empty' "$state_file" 2>/dev/null)
+        local prev_task=$(jq -r '.current_task // empty' "$state_file" 2>/dev/null)
+        
+        if [[ "$prev_state" == "REJECTED" && -n "$prev_task" ]]; then
+            local task_file_to_check="${tasks_dir}/${prev_task}.md"
+            
+            if [[ -f "$task_file_to_check" ]]; then
+                next_task="$prev_task"
+            fi
+        fi
+    fi
+    
+    if [[ -z "$next_task" ]]; then
+        return 0
+    else
+        echo "Should fallback when task file missing, got: $next_task" >&2
+        return 1
+    fi
+}
+
+test_corrupted_state_file_fallback() {
+    source_functions
+    
+    local state_file="$TEST_TMP_DIR/.ralph_state.json"
+    echo "{ invalid json }" > "$state_file"
+    
+    local next_task=""
+    
+    if [[ -f "$state_file" ]] && jq -e . "$state_file" >/dev/null 2>&1; then
+        next_task="SHOULD_NOT_BE_SET"
+    fi
+    
+    if [[ -z "$next_task" ]]; then
+        return 0
+    else
+        echo "Should fallback when state file corrupted" >&2
+        return 1
+    fi
+}
+
+# =====================================================
+# Tests: load_state
+# =====================================================
+
+test_load_state_restores_counters() {
+    source_functions
+    
+    local state_file="$TEST_TMP_DIR/.ralph_state.json"
+    cat > "$state_file" << 'EOF'
+{
+  "state": "REJECTED",
+  "iteration": 7,
+  "current_task": "T003",
+  "timestamp": "2026-06-26T12:00:00Z",
+  "pid": 12345,
+  "review_retries": 1,
+  "review_failures": 1,
+  "tasks_completed": 2,
+  "total_attempts": 15,
+  "failed_tasks": ["T001"],
+  "consecutive_failures": 1,
+  "impl_failures": 0,
+  "infra_failures": 1,
+  "task_rejection_counts": {"T003": 1}
+}
+EOF
+    
+    local STATE_FILE="$state_file"
+    local iteration=0 tasks_completed=0 consecutive_failures=0
+    local review_retries=0 review_failures=0 total_attempts=0
+    local failed_tasks="[]" task_rejection_counts="{}"
+    local impl_failures=0 infra_failures=0
+    
+    STATE_FILE="$state_file" && \
+    iteration=$(jq -r '.iteration // 0' "$STATE_FILE") && \
+    tasks_completed=$(jq -r '.tasks_completed // 0' "$STATE_FILE") && \
+    consecutive_failures=$(jq -r '.consecutive_failures // 0' "$STATE_FILE") && \
+    review_failures=$(jq -r '.review_failures // 0' "$STATE_FILE") && \
+    total_attempts=$(jq -r '.total_attempts // 0' "$STATE_FILE") && \
+    impl_failures=$(jq -r '.impl_failures // 0' "$STATE_FILE") && \
+    infra_failures=$(jq -r '.infra_failures // 0' "$STATE_FILE")
+    
+    if [[ "$iteration" -eq 7 && "$tasks_completed" -eq 2 && "$consecutive_failures" -eq 1 && "$review_failures" -eq 1 && "$impl_failures" -eq 0 && "$infra_failures" -eq 1 ]]; then
+        return 0
+    else
+        echo "Counters not restored: iter=$iteration, tasks=$tasks_completed, fail=$consecutive_failures" >&2
+        return 1
+    fi
+}
+
+# =====================================================
+# Tests: cycle detection
+# =====================================================
+
+test_cycle_detection_finds_cycle() {
+    source_functions
+    
+    local tasks_dir="$TEST_TMP_DIR/tasks"
+    mkdir -p "$tasks_dir"
+    local tasks_file="$TEST_TMP_DIR/tasks.md"
+    
+    cat > "$tasks_file" << 'EOF'
+# Tasks
+- [ ] T001: Task A
+- [ ] T002: Task B
+EOF
+    
+    cat > "$tasks_dir/T001.md" << 'EOF'
+---
+id: T001
+dependencies: [T002]
+---
+# T001
+EOF
+    
+    cat > "$tasks_dir/T002.md" << 'EOF'
+---
+id: T002
+dependencies: [T001]
+---
+# T002
+EOF
+    
+    local t001_deps t002_deps
+    t001_deps=$(parse_frontmatter_deps "$tasks_dir/T001.md")
+    t002_deps=$(parse_frontmatter_deps "$tasks_dir/T002.md")
+    
+    if echo "$t001_deps" | grep -q "T002" && echo "$t002_deps" | grep -q "T001"; then
+        return 0
+    else
+        echo "Should detect T001<->T002 cycle (deps: T001->$t001_deps, T002->$t002_deps)" >&2
+        return 1
+    fi
+}
+
+test_cycle_detection_no_cycle() {
+    source_functions
+    
+    local tasks_dir="$TEST_TMP_DIR/tasks"
+    mkdir -p "$tasks_dir"
+    local tasks_file="$TEST_TMP_DIR/tasks.md"
+    
+    cat > "$tasks_file" << 'EOF'
+# Tasks
+- [x] T001: Task A
+- [ ] T002: Task B
+EOF
+    
+    cat > "$tasks_dir/T001.md" << 'EOF'
+---
+id: T001
+---
+# T001
+EOF
+    
+    cat > "$tasks_dir/T002.md" << 'EOF'
+---
+id: T002
+dependencies: [T001]
+---
+# T002
+EOF
+    
+    local deps
+    deps=$(parse_frontmatter_deps "$tasks_dir/T002.md")
+    
+    if echo "$deps" | grep -q "T001" && ! echo "$deps" | grep -q "T002"; then
+        return 0
+    else
+        echo "T002 deps should only contain T001, got: $deps" >&2
+        return 1
+    fi
+}
+
+# =====================================================
 # Main
 # =====================================================
 
@@ -602,13 +900,23 @@ main() {
     run_test "mark_task_failed инициализирует массив" test_mark_task_failed_initializes_array
     run_test "mark_task_failed добавляет в массив" test_mark_task_failed_appends_to_array
     
-    run_test "build_cache создаёт записи" test_build_cache_creates_entries
-    run_test "get_task_status возвращает пусто для отсутствующей задачи" test_get_task_status_returns_empty_for_missing
+    run_test "is_task_completed возвращает true для выполненной" test_is_task_completed_returns_true_for_done
+    run_test "is_task_completed возвращает false для невыполненной" test_is_task_completed_returns_false_for_incomplete
+    run_test "parse_frontmatter_deps извлекает зависимости" test_parse_frontmatter_deps_extracts_deps
+    run_test "parse_frontmatter_deps возвращает пусто без зависимостей" test_parse_frontmatter_deps_returns_empty_for_no_deps
     
     run_test "save_state включает новые поля" test_save_state_includes_new_fields
     
     run_test "review_result формат валиден" test_review_result_file_format
     run_test "файлы создаются в feature_dir" test_file_paths_in_feature_dir
+    
+    run_test "review_result_file передаётся в prompt" test_review_result_file_passed_to_prompt
+    run_test "REJECTED task продолжается на следующей итерации" test_rejected_task_continued_on_next_iteration
+    run_test "Fallback при отсутствующем task file" test_rejected_task_missing_file_fallback
+    run_test "Fallback при повреждённом state file" test_corrupted_state_file_fallback
+    run_test "load_state восстанавливает счётчики" test_load_state_restores_counters
+    run_test "cycle detection обнаруживает цикл" test_cycle_detection_finds_cycle
+    run_test "cycle detection пропускает ацикличный граф" test_cycle_detection_no_cycle
     
     echo ""
     echo "========================================"

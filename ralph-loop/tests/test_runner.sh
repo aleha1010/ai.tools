@@ -502,14 +502,16 @@ test_print_status_error() {
 # =====================================================
 
 test_circuit_breaker_stops_after_three_failures() {
-    local mock_kilo="$TEST_TMP_DIR/mock_kilo.sh"
-    cat > "$mock_kilo" << 'EOF'
+    mkdir -p "$TEST_TMP_DIR/bin"
+    
+    cat > "$TEST_TMP_DIR/bin/kilo" << 'EOF'
 #!/bin/bash
 exit 1
 EOF
-    chmod +x "$mock_kilo"
+    chmod +x "$TEST_TMP_DIR/bin/kilo"
     
-    export KILO_CMD="$mock_kilo"
+    export PATH="$TEST_TMP_DIR/bin:$PATH"
+    export KILO_CMD="$TEST_TMP_DIR/bin/kilo"
     
     cd "$TEST_TMP_DIR"
     
