@@ -3,3 +3,4 @@ config.json
 *.secret
 .kilo/plans/
 .kilo/package-lock.json
+.kilo/agent-manager.json
