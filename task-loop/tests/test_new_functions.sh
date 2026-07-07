@@ -97,6 +97,21 @@ source_functions() {
         grep -qE "^\s*-\s*\[x\]\s+${task_id}" "$tasks_file" 2>/dev/null
     }
     
+    validate_state_file() {
+        if [[ ! -f "$STATE_FILE" ]]; then
+            return 0
+        fi
+        
+        if [[ ! -s "$STATE_FILE" ]]; then
+            return 0
+        fi
+        
+        if ! jq -e . "$STATE_FILE" >/dev/null 2>&1; then
+            echo "State file повреждён, запуск с чистого состояния" >&2
+            return 0
+        fi
+    }
+    
     parse_frontmatter_deps() {
         local task_file="$1"
         
@@ -739,9 +754,59 @@ test_corrupted_state_file_fallback() {
     fi
 }
 
+test_empty_state_file_silent() {
+    source_functions
+    
+    STATE_FILE="$TEST_TMP_DIR/.task_loop_state.json"
+    touch "$STATE_FILE"
+    
+    local output
+    output=$(validate_state_file 2>&1 || true)
+    
+    if [[ -z "$output" ]]; then
+        return 0
+    else
+        echo "Empty state file should produce no output, got: '$output'" >&2
+        return 1
+    fi
+}
+
+test_missing_state_file_silent() {
+    source_functions
+    
+    STATE_FILE="$TEST_TMP_DIR/.task_loop_state.json"
+    rm -f "$STATE_FILE"
+    
+    local output
+    output=$(validate_state_file 2>&1 || true)
+    
+    if [[ -z "$output" ]]; then
+        return 0
+    else
+        echo "Missing state file should produce no output, got: '$output'" >&2
+        return 1
+    fi
+}
+
+test_corrupted_state_file_shows_warning() {
+    source_functions
+    
+    STATE_FILE="$TEST_TMP_DIR/.task_loop_state.json"
+    echo "{ invalid json }" > "$STATE_FILE"
+    
+    local output
+    output=$(validate_state_file 2>&1 || true)
+    
+    if [[ "$output" == *"повреждён"* ]]; then
+        return 0
+    else
+        echo "Corrupted state file should show warning, got: '$output'" >&2
+        return 1
+    fi
+}
+
 # =====================================================
-# Tests: load_state
-# =====================================================
+# Tests: validate_state_file / load_state
 
 test_load_state_restores_counters() {
     source_functions
@@ -912,6 +977,9 @@ main() {
     run_test "REJECTED task продолжается на следующей итерации" test_rejected_task_continued_on_next_iteration
     run_test "Fallback при отсутствующем task file" test_rejected_task_missing_file_fallback
     run_test "Fallback при повреждённом state file" test_corrupted_state_file_fallback
+    run_test "Пустой state file — тихий выход (багфикс)" test_empty_state_file_silent
+    run_test "Отсутствующий state file — тихий выход" test_missing_state_file_silent
+    run_test "Повреждённый state file — предупреждение" test_corrupted_state_file_shows_warning
     run_test "load_state восстанавливает счётчики" test_load_state_restores_counters
     run_test "cycle detection обнаруживает цикл" test_cycle_detection_finds_cycle
     run_test "cycle detection пропускает ацикличный граф" test_cycle_detection_no_cycle
