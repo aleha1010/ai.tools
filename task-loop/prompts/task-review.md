@@ -6,17 +6,19 @@
 
 - Файл задач: $TASKS_PATH
 - Файл с выполненной задачей: $PENDING_TASKS_FILE
+- Файл с описанием задачи: $TASK_FILE_PATH
+- Файл PRD (опционально, может отсутствовать): $PRD_PATH
 - Файл для записи результата: $REVIEW_RESULT_FILE
 
 ## Порядок действий
 
-1. Прочитай $PENDING_TASKS_FILE чтобы узнать task_id и files_changed
-2. Прочитай $TASKS_PATH чтобы найти описание задачи
-3. Прочитай схему автовыбора: `~/.config/kilo/shared/review-selection.md`
-4. Определи тип задачи по описанию (Backend API, Frontend, Database, Integration, Full-stack)
-5. Выбери список ревьюеров согласно таблице автовыбора
-6. Проверь изменённые файлы: `git diff` (незакоммиченные изменения) или используй files_changed из $PENDING_TASKS_FILE
-7. Запусти `dotnet build` и `dotnet test` (или `npm test` / `pytest` — в зависимости от стека) если применимо. Запомни результат.
+1. Прочитай $PENDING_TASKS_FILE чтобы узнать task_id и summary
+2. Прочитай $TASK_FILE_PATH чтобы получить полное описание задачи (what to build, acceptance criteria, dependencies)
+3. Если $PRD_PATH существует — прочитай его для понимания бизнес-контекста фичи
+4. Прочитай схему автовыбора: `~/.config/kilo/shared/review-selection.md`
+5. Определи тип задачи по описанию (Backend API, Frontend, Database, Integration, Full-stack)
+6. Выбери список ревьюеров согласно таблице автовыбора
+7. Проверь изменённые файлы через `git diff` (незакоммиченные изменения)
 
 ## Запуск ревьюеров (ПАРАЛЛЕЛЬНО через task tool)
 
@@ -30,9 +32,19 @@ task tool:
   description: "Security review"
   prompt: |
     Загрузи skill "review-security" через skill tool.
-    Проанализируй изменения для задачи из $PENDING_TASKS_FILE.
-    Изменённые файлы: (из files_changed)
+    Проанализируй изменения задачи T001.
+
+    Описание задачи:
+    {содержимое $TASK_FILE_PATH}
+
+    Контекст фичи (PRD):
+    {содержимое $PRD_PATH, только если файл существует}
+
+    ВАЖНО: Ты проверяешь ТОЛЬКО задачу T001.
+    PRD дан для понимания бизнес-контекста, НЕ ревьюь его.
+
     Проверь: git diff
+
     Верни результат в JSON формате согласно протоколу skill.
 
 task tool:
@@ -40,9 +52,19 @@ task tool:
   description: "Architecture review"
   prompt: |
     Загрузи skill "review-architect-backend" через skill tool.
-    Проанализируй изменения для задачи из $PENDING_TASKS_FILE.
-    Изменённые файлы: (из files_changed)
+    Проанализируй изменения задачи T001.
+
+    Описание задачи:
+    {содержимое $TASK_FILE_PATH}
+
+    Контекст фичи (PRD):
+    {содержимое $PRD_PATH, только если файл существует}
+
+    ВАЖНО: Ты проверяешь ТОЛЬКО задачу T001.
+    PRD дан для понимания бизнес-контекста, НЕ ревьюь его.
+
     Проверь: git diff
+
     Верни результат в JSON формате согласно протоколу skill.
 ```
 
@@ -51,6 +73,7 @@ task tool:
 - НЕ запускай ревьюеров по очереди
 - Каждый субагент сам загрузит нужный skill через `skill` tool
 - Каждый субагент вернёт JSON с verdict и findings
+- Если $PRD_PATH не существует — не упоминай PRD в промпте субагентам
 
 ## Агрегация результатов
 
@@ -59,8 +82,8 @@ task tool:
 1. Собери все findings от каждого ревьюера
 2. Подсчитай: high_issues, medium_issues, low_issues (сумма по всем ревьюерам)
 3. Примени правило решения:
-   - **APPROVED** — все ревьюеры вернули APPROVED или CONDITIONALLY_APPROVED, И нет HIGH находок
-   - **REJECTED** — хотя бы один ревьюер вернул REJECTED, ИЛИ есть хотя бы одна HIGH находка
+   - **APPROVED** — все ревьюеры вернули APPROVED или CONDITIONALLY_APPROVED, И нет HIGH находок, И build_passed И tests_passed из $PENDING_TASKS_FILE == true
+   - **REJECTED** — хотя бы один ревьюер вернул REJECTED, ИЛИ есть хотя бы одна HIGH находка, ИЛИ build_passed == false, ИЛИ tests_passed == false
 4. Приоритет при конфликте: security → analyst → review-architect-backend → performance → dba
 
 ## Формат результата

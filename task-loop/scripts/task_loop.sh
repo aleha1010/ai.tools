@@ -513,6 +513,10 @@ load_state() {
         return 0
     fi
     
+    if [[ ! -s "$STATE_FILE" ]]; then
+        return 0
+    fi
+    
     if ! jq -e . "$STATE_FILE" >/dev/null 2>&1; then
         print_status "warning" "State file повреждён, запуск с чистого состояния"
         return 0
@@ -565,6 +569,7 @@ run_review_gate() {
     local iteration=$1
     local task_id=$2
     local pending_file=$3
+    local task_file_path=$4
     
     if [[ "$NO_REVIEW" == "true" ]]; then
         print_status "info" "Review gate отключён (--no-review)"
@@ -578,10 +583,19 @@ run_review_gate() {
     local safe_tasks_path=$(printf '%s' "$TASKS_PATH" | sed 's/[&/\]/\\&/g')
     local safe_pending_file=$(printf '%s' "$pending_file" | sed 's/[&/\]/\\&/g')
     local safe_review_result=$(printf '%s' "$REVIEW_RESULT_FILE" | sed 's/[&/\]/\\&/g')
+    local safe_task_file_path=$(printf '%s' "$task_file_path" | sed 's/[&/\]/\\&/g')
+    
+    local PRD_PATH="${FEATURE_DIR}/PRD.md"
+    local safe_prd_path=""
+    if [[ -f "$PRD_PATH" ]]; then
+        safe_prd_path=$(printf '%s' "$PRD_PATH" | sed 's/[&/\]/\\&/g')
+    fi
     
     local PROMPT=$(sed "s|\$TASKS_PATH|$safe_tasks_path|g" "$REVIEW_PROMPT_FILE")
     PROMPT=$(sed "s|\$PENDING_TASKS_FILE|$safe_pending_file|g" <<< "$PROMPT")
     PROMPT=$(sed "s|\$REVIEW_RESULT_FILE|$safe_review_result|g" <<< "$PROMPT")
+    PROMPT=$(sed "s|\$TASK_FILE_PATH|$safe_task_file_path|g" <<< "$PROMPT")
+    PROMPT=$(sed "s|\$PRD_PATH|$safe_prd_path|g" <<< "$PROMPT")
     
     set +e
     $KILO_CMD run --auto "$PROMPT"
@@ -1038,7 +1052,7 @@ main() {
         save_state "REVIEWING" "$iteration" "$pending_task_id"
         
         set +e
-        run_review_gate "$iteration" "$pending_task_id" "$PENDING_TASKS_FILE"
+        run_review_gate "$iteration" "$pending_task_id" "$PENDING_TASKS_FILE" "$TASK_FILE_PATH"
         local review_result=$?
         set -e
         

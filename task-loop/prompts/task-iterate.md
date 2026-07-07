@@ -17,9 +17,12 @@ Before starting:
    - If output is "NOT_EXISTS":
      - First iteration - implement task from scratch
 
-Implement the task:
-- Follow TDD: write tests first, then implementation
-- Run tests to verify
+Загрузи skill "tdd" через skill tool.
+
+Run typechecking (e.g. `dotnet build`, `tsc`, `npm run typecheck`) regularly.
+
+After implementing, run the full test suite.
+
 - DO NOT mark task as [x] - it will be marked after review
 
 After completing the task, create file "$PENDING_TASKS_FILE":
@@ -29,7 +32,6 @@ Note: $REVIEW_RESULT_FILE is the path where review coordinator will write the re
 ```json
 {
   "task_id": "T005",
-  "files_changed": ["path/to/file.cs"],
   "summary": "Краткое описание что сделано"
 }
 ```
