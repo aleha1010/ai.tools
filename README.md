@@ -61,8 +61,8 @@ Agents — это wrapper для вызова skills через Task tool.
 | Skill | Назначение |
 |-------|-----------|
 | `tdd` | Test-Driven Development (red-green-refactor) |
-| `caveman` | Ультра-сжатая коммуникация (~75% экономия токенов) |
 | `grill-me` | Интервью пользователя о плане/дизайне |
+| `grilling` | Движок интервью (вызывается из grill-me) |
 | `handoff` | Создание handoff-документа для другого агента |
 
 ## Task Loop
@@ -101,7 +101,123 @@ Agents — это wrapper для вызова skills через Task tool.
 
 Подробнее: [task-loop/README.md](task-loop/README.md)
 
-## Установка
+## Установка skills
+
+### Откуда брать skills
+
+Часть skills поставляется из репозитория [mattpocock/skills](https://github.com/mattpocock/skills).
+
+**Установка:**
+
+```bash
+# Клонировать репозиторий
+git clone --depth 1 https://github.com/mattpocock/skills.git /tmp/mattpocock-skills
+
+# Скопировать нужные skills (engineering)
+for skill in to-issues implement code-review tdd domain-modeling grill-with-docs to-prd; do
+  cp -r "/tmp/mattpocock-skills/skills/engineering/$skill" ~/.config/kilo/skills/"$skill"
+done
+
+# Скопировать нужные skills (productivity)
+for skill in grill-me handoff grilling; do
+  cp -r "/tmp/mattpocock-skills/skills/productivity/$skill" ~/.config/kilo/skills/"$skill"
+done
+```
+
+### Список skills и их происхождение
+
+| Skill | Источник | Модификация |
+|-------|----------|-------------|
+| `to-issues` | mattpocock | ✅ **Модифицирован** — см. инструкцию ниже |
+| `implement` | mattpocock | Оригинал |
+| `code-review` | mattpocock | Оригинал |
+| `tdd` | mattpocock | Оригинал |
+| `domain-modeling` | mattpocock | Оригинал |
+| `grill-with-docs` | mattpocock | Оригинал |
+| `to-prd` | mattpocock | Оригинал |
+| `grill-me` | mattpocock | ✅ **Модифицирован** — см. инструкцию ниже |
+| `grilling` | mattpocock | Оригинал |
+| `handoff` | mattpocock | ✅ **Модифицирован** — см. инструкцию ниже |
+| `review-*` (7 skills) | ai.tools (собственные) | — |
+| `escalation` | ai.tools (собственный) | — |
+| `kilo-session-search` | ai.tools (собственный) | — |
+
+### Инструкции по модификации
+
+#### `to-issues`
+
+Заменить шаг 5 (Publish to issue tracker) на сохранение в локальные файлы. Конкретно:
+
+1. Удалить шаг 5 полностью.
+2. Добавить новый шаг 5 — "Save issues as local task files" со следующей структурой:
+
+```
+{output_path}/
+├── tasks.md          # индекс задач
+├── progress.md       # прогресс (пустой)
+└── tasks/
+    ├── T001.md       # задача 1
+    ├── T002.md       # задача 2
+    └── ...
+```
+
+Где `{output_path}` = `.kilo/plans/{feature-name}/`. Формат `tasks.md` — checklist (совместимость с task-loop), ID задач строго `T001`, `T002`, ...
+
+3. Удалить все упоминания issue tracker, references, triage labels, `setup-matt-pocock-skills`.
+4. Удалить шаблон issue-template, заменить на task-template с YAML frontmatter:
+
+```markdown
+---
+id: T001
+dependencies: []
+---
+
+# T001: {Title}
+
+## What to build
+
+...
+
+## Acceptance Criteria
+
+- [ ] ...
+
+## Blocked by
+
+- None — can start immediately
+```
+
+5. Добавить в конец файла: `Do NOT attempt to publish issues to external issue trackers (JIRA, GitHub Issues, GitLab, etc.) unless the user explicitly asks for it.`
+
+#### `grill-me`
+
+После заглушки `Run a /grilling session.` добавить строку: `Веди интервью на русском языке.`
+
+Также скопировать `grilling` skill из `mattpocock/skills/productivity/grilling/` — он обязателен, так как `grill-me` на него ссылается.
+
+#### `handoff`
+
+Взять оригинал из mattpocock (с `disable-model-invocation: true`). После секции инструкций (строка 16) добавить блок:
+
+```markdown
+## Обязательные секции (если применимо)
+
+### ⚠️ TDD Contract
+
+Для задач с кодом ОБЯЗАТЕЛЬНО включить:
+
+\```
+## ⚠️ TDD Contract
+
+**Пользователь ВИДИТ каждое действие в реальном времени.**
+
+- [ ] Тест написан ДО кода?
+- [ ] Тест падал на RED фазе?
+- [ ] Код минимальный?
+
+**Нарушение TDD = изменения не приняты.**
+\```
+```
 
 ### В kilo.json
 
