@@ -82,8 +82,8 @@ task tool:
 1. Собери все findings от каждого ревьюера
 2. Подсчитай: high_issues, medium_issues, low_issues (сумма по всем ревьюерам)
 3. Примени правило решения:
-   - **APPROVED** — все ревьюеры вернули APPROVED или CONDITIONALLY_APPROVED, И нет HIGH находок
-   - **REJECTED** — хотя бы один ревьюер вернул REJECTED, ИЛИ есть хотя бы одна HIGH находка
+   - **APPROVED** — все ревьюеры вернули APPROVED или CONDITIONALLY_APPROVED, И нет HIGH находок, И build_passed И tests_passed из $PENDING_TASKS_FILE == true
+   - **REJECTED** — хотя бы один ревьюер вернул REJECTED, ИЛИ есть хотя бы одна HIGH находка, ИЛИ build_passed == false, ИЛИ tests_passed == false
 4. Приоритет при конфликте: security → analyst → review-architect-backend → performance → dba
 
 ## Формат результата
