@@ -1137,6 +1137,559 @@ test_current_rejections_handles_multiline_jq_output() {
 }
 
 # =====================================================
+# ТЕСТЫ: run_test_gate
+# =====================================================
+
+test_run_test_gate_npm_detects_and_runs() {
+    mkdir -p "$TEST_TMP_DIR/project"
+    cat > "$TEST_TMP_DIR/project/package.json" << 'EOF'
+{
+  "scripts": { "test": "true" }
+}
+EOF
+
+    run_test_gate() {
+        local project_root="$1"
+        local test_cmd="" test_desc=""
+        
+        if [[ -f "$project_root/package.json" ]]; then
+            if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
+                test_cmd="true"
+                test_desc="npm test"
+            fi
+        fi
+        
+        if [[ -z "$test_cmd" ]]; then
+            echo "SKIPPED"
+            return 0
+        fi
+        
+        set +e
+        eval "$test_cmd" 2>&1
+        local test_exit_code=$?
+        set -e
+        
+        if [[ $test_exit_code -ne 0 ]]; then
+            return 1
+        fi
+        
+        return 0
+    }
+    
+    run_test_gate "$TEST_TMP_DIR/project"
+    local result=$?
+    
+    if [[ $result -eq 0 ]]; then
+        return 0
+    else
+        echo "npm test gate returned $result" >&2
+        return 1
+    fi
+}
+
+test_run_test_gate_npm_failure_detected() {
+    mkdir -p "$TEST_TMP_DIR/project"
+    cat > "$TEST_TMP_DIR/project/package.json" << 'EOF'
+{
+  "scripts": { "test": "false" }
+}
+EOF
+
+    run_test_gate() {
+        local project_root="$1"
+        local test_cmd="" test_desc=""
+        
+        if [[ -f "$project_root/package.json" ]]; then
+            if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
+                test_cmd="false"
+                test_desc="npm test"
+            fi
+        fi
+        
+        if [[ -z "$test_cmd" ]]; then
+            echo "SKIPPED"
+            return 0
+        fi
+        
+        set +e
+        eval "$test_cmd" 2>&1
+        local test_exit_code=$?
+        set -e
+        
+        if [[ $test_exit_code -ne 0 ]]; then
+            return 1
+        fi
+        
+        return 0
+    }
+    
+    run_test_gate "$TEST_TMP_DIR/project"
+    local result=$?
+    
+    if [[ $result -eq 1 ]]; then
+        return 0
+    else
+        echo "npm test gate should detect failure, returned $result" >&2
+        return 1
+    fi
+}
+
+test_run_test_gate_dotnet_detected() {
+    local test_script="$TEST_TMP_DIR/test_gate_dotnet.sh"
+    
+    mkdir -p "$TEST_TMP_DIR/project"
+    touch "$TEST_TMP_DIR/project/MyApp.csproj"
+    
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+run_test_gate() {
+    local project_root="$1"
+    local test_cmd="" test_desc=""
+    
+    if [[ -f "$project_root/package.json" ]]; then
+        if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
+            test_cmd="npm test"
+            test_desc="npm test"
+        fi
+    elif [[ -n "$(find "$project_root" -maxdepth 2 -name "*.csproj" -print -quit 2>/dev/null)" ]]; then
+        test_cmd="dotnet test --no-build 2>/dev/null || dotnet test"
+        test_desc="dotnet test"
+    fi
+    
+    if [[ -z "$test_cmd" ]]; then
+        echo "NO_TEST_CMD"
+        return 0
+    fi
+    
+    if [[ "$test_cmd" == "dotnet test --no-build 2>/dev/null || dotnet test" ]]; then
+        echo "DOTNET_DETECTED"
+        return 0
+    else
+        echo "WRONG_CMD: $test_cmd" >&2
+        exit 1
+    fi
+}
+
+run_test_gate "$1"
+SCRIPT
+
+    chmod +x "$test_script"
+    
+    local output
+    output=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$TEST_TMP_DIR/project" 2>&1)
+    
+    if [[ "$output" == "DOTNET_DETECTED" ]]; then
+        return 0
+    else
+        echo "dotnet not detected: $output" >&2
+        return 1
+    fi
+}
+
+test_run_test_gate_pytest_detected() {
+    local test_script="$TEST_TMP_DIR/test_gate_pytest.sh"
+    
+    mkdir -p "$TEST_TMP_DIR/project"
+    touch "$TEST_TMP_DIR/project/pytest.ini"
+    
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+run_test_gate() {
+    local project_root="$1"
+    local test_cmd="" test_desc=""
+    
+    if [[ -f "$project_root/package.json" ]]; then
+        if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
+            test_cmd="npm test"
+            test_desc="npm test"
+        fi
+    elif [[ -n "$(find "$project_root" -maxdepth 2 -name "*.csproj" -print -quit 2>/dev/null)" ]]; then
+        test_cmd="dotnet test --no-build 2>/dev/null || dotnet test"
+        test_desc="dotnet test"
+    elif [[ -f "$project_root/pytest.ini" ]] || [[ -f "$project_root/setup.py" ]] || [[ -n "$(find "$project_root" -maxdepth 2 -name 'conftest.py' -print -quit 2>/dev/null)" ]]; then
+        test_cmd="pytest"
+        test_desc="pytest"
+    fi
+    
+    if [[ -z "$test_cmd" ]]; then
+        echo "NO_TEST_CMD"
+        return 0
+    fi
+    
+    if [[ "$test_cmd" == "pytest" ]]; then
+        echo "PYTEST_DETECTED"
+        return 0
+    else
+        echo "WRONG_CMD: $test_cmd" >&2
+        exit 1
+    fi
+}
+
+run_test_gate "$1"
+SCRIPT
+
+    chmod +x "$test_script"
+    
+    local output
+    output=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$TEST_TMP_DIR/project" 2>&1)
+    
+    if [[ "$output" == "PYTEST_DETECTED" ]]; then
+        return 0
+    else
+        echo "pytest not detected: $output" >&2
+        return 1
+    fi
+}
+
+test_run_test_gate_cargo_detected() {
+    local test_script="$TEST_TMP_DIR/test_gate_cargo.sh"
+    
+    mkdir -p "$TEST_TMP_DIR/project"
+    touch "$TEST_TMP_DIR/project/Cargo.toml"
+    
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+run_test_gate() {
+    local project_root="$1"
+    local test_cmd="" test_desc=""
+    
+    if [[ -f "$project_root/package.json" ]]; then
+        if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
+            test_cmd="npm test"
+            test_desc="npm test"
+        fi
+    elif [[ -n "$(find "$project_root" -maxdepth 2 -name "*.csproj" -print -quit 2>/dev/null)" ]]; then
+        test_cmd="dotnet test --no-build 2>/dev/null || dotnet test"
+        test_desc="dotnet test"
+    elif [[ -f "$project_root/pytest.ini" ]] || [[ -f "$project_root/setup.py" ]] || [[ -n "$(find "$project_root" -maxdepth 2 -name 'conftest.py' -print -quit 2>/dev/null)" ]]; then
+        test_cmd="pytest"
+        test_desc="pytest"
+    elif [[ -f "$project_root/Cargo.toml" ]]; then
+        test_cmd="cargo test"
+        test_desc="cargo test"
+    fi
+    
+    if [[ -z "$test_cmd" ]]; then
+        echo "NO_TEST_CMD"
+        return 0
+    fi
+    
+    if [[ "$test_cmd" == "cargo test" ]]; then
+        echo "CARGO_DETECTED"
+        return 0
+    else
+        echo "WRONG_CMD: $test_cmd" >&2
+        exit 1
+    fi
+}
+
+run_test_gate "$1"
+SCRIPT
+
+    chmod +x "$test_script"
+    
+    local output
+    output=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$TEST_TMP_DIR/project" 2>&1)
+    
+    if [[ "$output" == "CARGO_DETECTED" ]]; then
+        return 0
+    else
+        echo "cargo not detected: $output" >&2
+        return 1
+    fi
+}
+
+test_run_test_gate_go_detected() {
+    local test_script="$TEST_TMP_DIR/test_gate_go.sh"
+    
+    mkdir -p "$TEST_TMP_DIR/project"
+    touch "$TEST_TMP_DIR/project/go.mod"
+    
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+run_test_gate() {
+    local project_root="$1"
+    local test_cmd="" test_desc=""
+    
+    if [[ -f "$project_root/package.json" ]]; then
+        if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
+            test_cmd="npm test"
+            test_desc="npm test"
+        fi
+    elif [[ -n "$(find "$project_root" -maxdepth 2 -name "*.csproj" -print -quit 2>/dev/null)" ]]; then
+        test_cmd="dotnet test --no-build 2>/dev/null || dotnet test"
+        test_desc="dotnet test"
+    elif [[ -f "$project_root/pytest.ini" ]] || [[ -f "$project_root/setup.py" ]] || [[ -n "$(find "$project_root" -maxdepth 2 -name 'conftest.py' -print -quit 2>/dev/null)" ]]; then
+        test_cmd="pytest"
+        test_desc="pytest"
+    elif [[ -f "$project_root/Cargo.toml" ]]; then
+        test_cmd="cargo test"
+        test_desc="cargo test"
+    elif [[ -f "$project_root/go.mod" ]]; then
+        test_cmd="go test ./..."
+        test_desc="go test"
+    fi
+    
+    if [[ -z "$test_cmd" ]]; then
+        echo "NO_TEST_CMD"
+        return 0
+    fi
+    
+    if [[ "$test_cmd" == "go test ./..." ]]; then
+        echo "GO_DETECTED"
+        return 0
+    else
+        echo "WRONG_CMD: $test_cmd" >&2
+        exit 1
+    fi
+}
+
+run_test_gate "$1"
+SCRIPT
+
+    chmod +x "$test_script"
+    
+    local output
+    output=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$TEST_TMP_DIR/project" 2>&1)
+    
+    if [[ "$output" == "GO_DETECTED" ]]; then
+        return 0
+    else
+        echo "go not detected: $output" >&2
+        return 1
+    fi
+}
+
+test_run_test_gate_unknown_project_skips() {
+    local test_script="$TEST_TMP_DIR/test_gate_unknown.sh"
+    
+    mkdir -p "$TEST_TMP_DIR/project"
+    
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+run_test_gate() {
+    local project_root="$1"
+    local test_cmd="" test_desc=""
+    
+    if [[ -f "$project_root/package.json" ]]; then
+        if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
+            test_cmd="npm test"
+        fi
+    elif [[ -n "$(find "$project_root" -maxdepth 2 -name "*.csproj" -print -quit 2>/dev/null)" ]]; then
+        test_cmd="dotnet test --no-build 2>/dev/null || dotnet test"
+    elif [[ -f "$project_root/pytest.ini" ]] || [[ -f "$project_root/setup.py" ]] || [[ -n "$(find "$project_root" -maxdepth 2 -name 'conftest.py' -print -quit 2>/dev/null)" ]]; then
+        test_cmd="pytest"
+    elif [[ -f "$project_root/Cargo.toml" ]]; then
+        test_cmd="cargo test"
+    elif [[ -f "$project_root/go.mod" ]]; then
+        test_cmd="go test ./..."
+    fi
+    
+    if [[ -z "$test_cmd" ]]; then
+        echo "SKIPPED"
+        return 0
+    fi
+    
+    echo "UNEXPECTED_CMD: $test_cmd" >&2
+    exit 1
+}
+
+run_test_gate "$1"
+SCRIPT
+
+    chmod +x "$test_script"
+    
+    local output
+    output=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$TEST_TMP_DIR/project" 2>&1)
+    
+    if [[ "$output" == "SKIPPED" ]]; then
+        return 0
+    else
+        echo "Unknown project not skipped: $output" >&2
+        return 1
+    fi
+}
+
+test_run_test_gate_priority_npm_over_dotnet() {
+    local test_script="$TEST_TMP_DIR/test_gate_priority.sh"
+    
+    mkdir -p "$TEST_TMP_DIR/project"
+    cat > "$TEST_TMP_DIR/project/package.json" << 'EOF'
+{
+  "scripts": { "test": "echo ok" }
+}
+EOF
+    touch "$TEST_TMP_DIR/project/MyApp.csproj"
+    touch "$TEST_TMP_DIR/project/Cargo.toml"
+    touch "$TEST_TMP_DIR/project/go.mod"
+    
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+run_test_gate() {
+    local project_root="$1"
+    local test_cmd="" test_desc=""
+    
+    if [[ -f "$project_root/package.json" ]]; then
+        if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
+            test_cmd="npm test"
+            test_desc="npm test"
+        fi
+    elif [[ -n "$(find "$project_root" -maxdepth 2 -name "*.csproj" -print -quit 2>/dev/null)" ]]; then
+        test_cmd="dotnet test --no-build 2>/dev/null || dotnet test"
+        test_desc="dotnet test"
+    elif [[ -f "$project_root/pytest.ini" ]] || [[ -f "$project_root/setup.py" ]] || [[ -n "$(find "$project_root" -maxdepth 2 -name 'conftest.py' -print -quit 2>/dev/null)" ]]; then
+        test_cmd="pytest"
+        test_desc="pytest"
+    elif [[ -f "$project_root/Cargo.toml" ]]; then
+        test_cmd="cargo test"
+        test_desc="cargo test"
+    elif [[ -f "$project_root/go.mod" ]]; then
+        test_cmd="go test ./..."
+        test_desc="go test"
+    fi
+    
+    echo "$test_cmd"
+}
+
+cmd=$(run_test_gate "$1")
+if [[ "$cmd" == "npm test" ]]; then
+    echo "PASS"
+else
+    echo "FAIL: expected npm test, got $cmd" >&2
+    exit 1
+fi
+SCRIPT
+
+    chmod +x "$test_script"
+    
+    local output
+    output=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$TEST_TMP_DIR/project" 2>&1)
+    
+    if [[ "$output" == "PASS" ]]; then
+        return 0
+    else
+        echo "Priority order not respected: $output" >&2
+        return 1
+    fi
+}
+
+test_run_test_gate_conftest_py_detected() {
+    local test_script="$TEST_TMP_DIR/test_gate_conftest.sh"
+    
+    mkdir -p "$TEST_TMP_DIR/project/subdir"
+    touch "$TEST_TMP_DIR/project/subdir/conftest.py"
+    
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+run_test_gate() {
+    local project_root="$1"
+    local test_cmd="" test_desc=""
+    
+    if [[ -f "$project_root/package.json" ]]; then
+        if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
+            test_cmd="npm test"
+            test_desc="npm test"
+        fi
+    elif [[ -n "$(find "$project_root" -maxdepth 2 -name "*.csproj" -print -quit 2>/dev/null)" ]]; then
+        test_cmd="dotnet test --no-build 2>/dev/null || dotnet test"
+        test_desc="dotnet test"
+    elif [[ -f "$project_root/pytest.ini" ]] || [[ -f "$project_root/setup.py" ]] || [[ -n "$(find "$project_root" -maxdepth 2 -name 'conftest.py' -print -quit 2>/dev/null)" ]]; then
+        test_cmd="pytest"
+        test_desc="pytest"
+    fi
+    
+    if [[ "$test_cmd" == "pytest" ]]; then
+        echo "PYTEST_CONFTEST"
+        return 0
+    else
+        echo "NO_PYTEST" >&2
+        exit 1
+    fi
+}
+
+run_test_gate "$1"
+SCRIPT
+
+    chmod +x "$test_script"
+    
+    local output
+    output=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$TEST_TMP_DIR/project" 2>&1)
+    
+    if [[ "$output" == "PYTEST_CONFTEST" ]]; then
+        return 0
+    else
+        echo "conftest.py not detected: $output" >&2
+        return 1
+    fi
+}
+
+test_run_test_gate_setup_py_detected() {
+    local test_script="$TEST_TMP_DIR/test_gate_setup_py.sh"
+    
+    mkdir -p "$TEST_TMP_DIR/project"
+    touch "$TEST_TMP_DIR/project/setup.py"
+    
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+run_test_gate() {
+    local project_root="$1"
+    local test_cmd="" test_desc=""
+    
+    if [[ -f "$project_root/package.json" ]]; then
+        if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
+            test_cmd="npm test"
+            test_desc="npm test"
+        fi
+    elif [[ -n "$(find "$project_root" -maxdepth 2 -name "*.csproj" -print -quit 2>/dev/null)" ]]; then
+        test_cmd="dotnet test --no-build 2>/dev/null || dotnet test"
+        test_desc="dotnet test"
+    elif [[ -f "$project_root/pytest.ini" ]] || [[ -f "$project_root/setup.py" ]] || [[ -n "$(find "$project_root" -maxdepth 2 -name 'conftest.py' -print -quit 2>/dev/null)" ]]; then
+        test_cmd="pytest"
+        test_desc="pytest"
+    fi
+    
+    if [[ "$test_cmd" == "pytest" ]]; then
+        echo "PYTEST_SETUP_PY"
+        return 0
+    else
+        echo "NO_PYTEST" >&2
+        exit 1
+    fi
+}
+
+run_test_gate "$1"
+SCRIPT
+
+    chmod +x "$test_script"
+    
+    local output
+    output=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$TEST_TMP_DIR/project" 2>&1)
+    
+    if [[ "$output" == "PYTEST_SETUP_PY" ]]; then
+        return 0
+    else
+        echo "setup.py not detected: $output" >&2
+        return 1
+    fi
+}
+
+# =====================================================
 # ЗАПУСК ТЕСТОВ
 
 # =====================================================
@@ -1312,6 +1865,18 @@ main() {
     run_test "MAX_TASK_REJECTIONS существует" test_max_task_rejections_exists
     run_test "задача эскалируется при достижении лимита" test_task_can_be_rejected_up_to_limit
     run_test "счётчик отклонений инкрементируется" test_task_rejection_counter_increments
+
+    # Тесты run_test_gate
+    run_test "run_test_gate: npm определяет и запускает" test_run_test_gate_npm_detects_and_runs
+    run_test "run_test_gate: npm failure детектится" test_run_test_gate_npm_failure_detected
+    run_test "run_test_gate: dotnet определяется" test_run_test_gate_dotnet_detected
+    run_test "run_test_gate: pytest (pytest.ini) определяется" test_run_test_gate_pytest_detected
+    run_test "run_test_gate: cargo определяется" test_run_test_gate_cargo_detected
+    run_test "run_test_gate: go определяется" test_run_test_gate_go_detected
+    run_test "run_test_gate: неизвестный проект пропускается" test_run_test_gate_unknown_project_skips
+    run_test "run_test_gate: приоритет npm > dotnet" test_run_test_gate_priority_npm_over_dotnet
+    run_test "run_test_gate: pytest (conftest.py) определяется" test_run_test_gate_conftest_py_detected
+    run_test "run_test_gate: pytest (setup.py) определяется" test_run_test_gate_setup_py_detected
     
     echo ""
     echo "========================================"
