@@ -613,7 +613,7 @@ run_review_gate() {
     PROMPT=$(sed "s|\$PRD_PATH|$safe_prd_path|g" <<< "$PROMPT")
     
     set +e
-    $KILO_CMD run --auto "$PROMPT"
+    run_kilo_with_sentinel "review-$task_id" "$PROMPT" "$REVIEW_RESULT_FILE" "$PENDING_GRACE_SECONDS"
     local exit_code=$?
     # Do NOT re-enable errexit here — the caller manages it.
     # Re-enabling errexit inside this function causes return 1 to kill the script
@@ -701,69 +701,86 @@ EOF
 }
 
 # =====================================================
-# KILO EXECUTION WITH PENDING FILE DETECTION
+# GENERIC KILO EXECUTION WITH SENTINEL FILE DETECTION
 # =====================================================
-# Launches kilo in background, monitors for pending file,
-# and kills kilo once pending file appears (with grace period).
+# Launches kilo in background, monitors for a sentinel file,
+# and kills kilo once sentinel appears (with grace period).
 # This prevents hanging when model finishes work but doesn't exit.
+# Works with any sentinel file — pending tasks or review result.
 
-run_kilo_with_pending_detection() {
-    local task_id="$1"
-    local prompt="$2"
-    local pending_file="$3"
-    
-    log_message "INFO" "Starting Kilo for task $task_id (background monitoring enabled)"
-    
-    set +e
-    local kilo_bin="$KILO_CMD"
-    $kilo_bin run --auto "$prompt" &
-    local kilo_pid=$!
-    set -e
-    
-    log_message "INFO" "Kilo PID: $kilo_pid, monitoring for $pending_file..."
-    
-    local pending_found=false
-    local pending_start_seconds=""
-    local kilo_exit_code=0
-    
-    await_kilo_or_kill_on_pending() {
-        if ! kill -0 $kilo_pid 2>/dev/null; then
-            wait $kilo_pid 2>/dev/null || true
-            kilo_exit_code=$?
-            log_message "INFO" "Kilo exited on its own for task $task_id (exit code: $kilo_exit_code)"
-            if [[ "$pending_found" == "true" ]]; then
-                log_message "INFO" "Pending file was already created — task is done"
-            fi
-            return 0
-        fi
-        
-        if [[ "$pending_found" == "false" && -f "$pending_file" ]]; then
-            pending_found=true
-            pending_start_seconds=$(date +%s)
-            log_message "INFO" "Pending file detected for task $task_id — waiting ${PENDING_GRACE_SECONDS}s before kill"
-        fi
-        
-        if [[ "$pending_found" == "true" ]]; then
-            local now
-            now=$(date +%s)
-            local elapsed=$((now - pending_start_seconds))
-            if [[ $elapsed -ge $PENDING_GRACE_SECONDS ]]; then
-                log_message "INFO" "Grace period expired — killing Kilo (PID: $kilo_pid)"
-                kill $kilo_pid 2>/dev/null || true
-                wait $kilo_pid 2>/dev/null || true
-                log_message "INFO" "Kilo stopped after pending file was created"
-                kilo_exit_code=0
+_monitor_kilo() {
+    local kilo_pid=$1
+    local sentinel_file=$2
+    local grace_seconds=$3
+    local task_id=$4
+    local kilo_exit_code_var=$5
+
+    if [[ -z "$kilo_exit_code_var" ]]; then
+        log_message "ERROR" "printf -v target variable name is empty in _monitor_kilo"
+        return 1
+    fi
+
+    if ! kill -0 $kilo_pid 2>/dev/null; then
+        wait $kilo_pid 2>/dev/null; local rc=$?; true
+        printf -v "$kilo_exit_code_var" '%s' "$rc"
+        log_message "INFO" "Kilo exited on its own for task $task_id (exit code: $rc)"
+        return 0
+    fi
+
+    if [[ -n "$sentinel_file" && -f "$sentinel_file" ]]; then
+        log_message "INFO" "Sentinel file detected for task $task_id — waiting ${grace_seconds}s before kill"
+
+        local deadline=$(($(date +%s) + grace_seconds))
+        while [[ $(date +%s) -lt $deadline ]]; do
+            sleep 0.5
+            if ! kill -0 $kilo_pid 2>/dev/null; then
+                wait $kilo_pid 2>/dev/null; local rc=$?; true
+                printf -v "$kilo_exit_code_var" '%s' "$rc"
+                log_message "INFO" "Kilo exited on its own during grace period for task $task_id (exit code: $rc)"
                 return 0
             fi
-        fi
-        
-        return 1
-    }
-    
+        done
+
+        log_message "INFO" "Grace period expired — killing Kilo (PID: $kilo_pid)"
+        kill $kilo_pid 2>/dev/null || true
+        wait $kilo_pid 2>/dev/null; local rc=$?; true
+        printf -v "$kilo_exit_code_var" '%s' "0"
+        log_message "INFO" "Kilo stopped after sentinel file was created"
+        return 0
+    fi
+
+    return 1
+}
+
+run_kilo_with_sentinel() {
+    local task_id="$1"
+    local prompt="$2"
+    local sentinel_file="$3"
+    local grace_seconds="${4:-$PENDING_GRACE_SECONDS}"
+
+    log_message "INFO" "Starting Kilo for task $task_id (background monitoring enabled)"
+
+    local kilo_bin="$KILO_CMD"
+    if [[ -n "$sentinel_file" ]]; then
+        rm -f "$sentinel_file"
+    fi
+    $kilo_bin run --auto "$prompt" &
+    local kilo_pid=$!
+
+    log_message "INFO" "Kilo PID: $kilo_pid, monitoring for $sentinel_file..."
+
+    local kilo_exit_code=0
+
     while true; do
-        if await_kilo_or_kill_on_pending; then
+        if _monitor_kilo "$kilo_pid" "$sentinel_file" "$grace_seconds" "$task_id" kilo_exit_code; then
             return $kilo_exit_code
         fi
+
+        if [[ -n "$sentinel_file" && -f "$sentinel_file" ]]; then
+            _monitor_kilo "$kilo_pid" "$sentinel_file" "0" "$task_id" kilo_exit_code
+            return $kilo_exit_code
+        fi
+
         sleep 2
     done
 }
@@ -941,6 +958,8 @@ main() {
     local max_total_attempts=$((MAX_ITERATIONS * MAX_TOTAL_ATTEMPTS_MULTIPLIER))
     
     load_state
+
+    rm -f "$REVIEW_RESULT_FILE"
     
     while [[ $total_attempts -lt $max_total_attempts ]]; do
         ((total_attempts++))
@@ -1027,8 +1046,10 @@ main() {
         PROMPT=$(printf '%s' "$PROMPT")
         
         local exit_code
-        run_kilo_with_pending_detection "$next_task" "$PROMPT" "$PENDING_TASKS_FILE"
+        set +e
+        run_kilo_with_sentinel "$next_task" "$PROMPT" "$PENDING_TASKS_FILE" "$PENDING_GRACE_SECONDS"
         exit_code=$?
+        set -e
         
         local escalation_file="${FEATURE_DIR}/.escalation_handoff.md"
         local escalation_file_alt="${PROJECT_ROOT}/.escalation_handoff.md"
