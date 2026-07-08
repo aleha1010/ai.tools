@@ -724,16 +724,16 @@ run_kilo_with_pending_detection() {
     
     local pending_found=false
     local pending_start_seconds=""
+    local kilo_exit_code=0
     
     await_kilo_or_kill_on_pending() {
         if ! kill -0 $kilo_pid 2>/dev/null; then
             wait $kilo_pid 2>/dev/null || true
-            local exit_code=$?
-            log_message "INFO" "Kilo exited on its own for task $task_id (exit code: $exit_code)"
+            kilo_exit_code=$?
+            log_message "INFO" "Kilo exited on its own for task $task_id (exit code: $kilo_exit_code)"
             if [[ "$pending_found" == "true" ]]; then
                 log_message "INFO" "Pending file was already created — task is done"
             fi
-            echo "$exit_code"
             return 0
         fi
         
@@ -752,7 +752,7 @@ run_kilo_with_pending_detection() {
                 kill $kilo_pid 2>/dev/null || true
                 wait $kilo_pid 2>/dev/null || true
                 log_message "INFO" "Kilo stopped after pending file was created"
-                echo "0"
+                kilo_exit_code=0
                 return 0
             fi
         fi
@@ -762,7 +762,7 @@ run_kilo_with_pending_detection() {
     
     while true; do
         if await_kilo_or_kill_on_pending; then
-            return
+            return $kilo_exit_code
         fi
         sleep 2
     done
@@ -1027,7 +1027,8 @@ main() {
         PROMPT=$(printf '%s' "$PROMPT")
         
         local exit_code
-        exit_code=$(run_kilo_with_pending_detection "$next_task" "$PROMPT" "$PENDING_TASKS_FILE")
+        run_kilo_with_pending_detection "$next_task" "$PROMPT" "$PENDING_TASKS_FILE"
+        exit_code=$?
         
         local escalation_file="${FEATURE_DIR}/.escalation_handoff.md"
         local escalation_file_alt="${PROJECT_ROOT}/.escalation_handoff.md"
