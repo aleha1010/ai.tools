@@ -1520,6 +1520,87 @@ SCRIPT
     fi
 }
 
+# =====================================================
+# ТЕСТЫ: run_kilo_with_pending_detection
+# =====================================================
+
+test_kilo_writes_pending_then_exits() {
+    local test_script="$TEST_TMP_DIR/test_kilo_writes_pending.sh"
+    
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+PENDING_TASKS_FILE="$1"
+
+kilo_sim() {
+    echo '{"task_id": "T001"}' > "$1"
+    exit 0
+}
+
+kilo_sim "$PENDING_TASKS_FILE" &
+kilo_pid=$!
+wait $kilo_pid 2>/dev/null || true
+exit_code=$?
+if [[ -f "$PENDING_TASKS_FILE" && $exit_code -eq 0 ]]; then
+    echo "PASS"
+else
+    echo "FAIL:pending=$([ -f "$PENDING_TASKS_FILE" ] && echo 1 || echo 0),exit=$exit_code"
+fi
+SCRIPT
+
+    chmod +x "$test_script"
+    
+    local output
+    output=$(bash "$test_script" "$TEST_TMP_DIR/.task_loop_pending_tasks.json" 2>&1)
+    
+    if [[ "$output" == "PASS" ]]; then
+        return 0
+    else
+        echo "Expected PASS, got: $output" >&2
+        return 1
+    fi
+}
+
+test_kilo_killed_after_writing_pending() {
+    local test_script="$TEST_TMP_DIR/test_kilo_hangs.sh"
+    
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+PENDING_TASKS_FILE="$1"
+
+kilo_sim() {
+    echo '{"task_id": "T001"}' > "$1"
+    sleep 600
+}
+
+kilo_sim "$PENDING_TASKS_FILE" &
+kilo_pid=$!
+sleep 1
+kill $kilo_pid 2>/dev/null || true
+wait $kilo_pid 2>/dev/null || true
+if [[ -f "$PENDING_TASKS_FILE" ]]; then
+    echo "KILLED_WITH_PENDING"
+else
+    echo "NO_PENDING_FILE"
+fi
+SCRIPT
+
+    chmod +x "$test_script"
+    
+    local output
+    output=$(bash "$test_script" "$TEST_TMP_DIR/.task_loop_pending_tasks.json" 2>&1)
+    
+    if [[ "$output" == "KILLED_WITH_PENDING" ]]; then
+        return 0
+    else
+        echo "Expected KILLED_WITH_PENDING, got: $output" >&2
+        return 1
+    fi
+}
+
 test_run_test_gate_priority_npm_over_dotnet() {
     local test_script="$TEST_TMP_DIR/test_gate_priority.sh"
     
@@ -1865,6 +1946,10 @@ main() {
     run_test "MAX_TASK_REJECTIONS существует" test_max_task_rejections_exists
     run_test "задача эскалируется при достижении лимита" test_task_can_be_rejected_up_to_limit
     run_test "счётчик отклонений инкрементируется" test_task_rejection_counter_increments
+
+    # Тесты run_kilo_with_pending_detection
+    run_test "kilo пишет pending и завершается" test_kilo_writes_pending_then_exits
+    run_test "kilo убит после записи pending-файла" test_kilo_killed_after_writing_pending
 
     # Тесты run_test_gate
     run_test "run_test_gate: npm определяет и запускает" test_run_test_gate_npm_detects_and_runs

@@ -101,4 +101,8 @@ EOF
 - Технический блокер
 - Scope creep (задача требует изменений в нескольких модулях)
 
-Execute exactly ONE task, create pending file, then exit.
+Execute exactly ONE task, create pending file ($PENDING_TASKS_FILE), then:
+
+1. Print a brief summary — 5-10 lines max: what was implemented, what tests were added, any key decisions.
+2. **Do NOT** ask follow-up questions, do NOT propose next steps, do NOT wait for confirmation.
+3. Immediately stop — orchestrator will detect the pending file and proceed to review.

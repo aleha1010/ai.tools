@@ -34,6 +34,7 @@ readonly MAX_TOTAL_ATTEMPTS_MULTIPLIER=10
 readonly DEFAULT_MAX_ITERATIONS=50
 readonly MIN_ITERATIONS=1
 readonly MAX_ITERATIONS_LIMIT=1000
+readonly PENDING_GRACE_SECONDS=30
 #endregion
 
 #region Конфигурация
@@ -344,13 +345,18 @@ print_header() {
     echo "========================================================"
 }
 
+format_timestamp() {
+    date +'%H:%M:%S'
+}
+
 print_phase() {
     local phase=$1
     local message=$2
-    local timestamp=$(date +'%H:%M:%S')
+    local ts
+    ts=$(format_timestamp)
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "[$timestamp] $phase: $message"
+    echo "[$ts] $phase: $message"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 }
@@ -358,7 +364,8 @@ print_phase() {
 print_status() {
     local status=$1
     local message=$2
-    local timestamp=$(date +'%H:%M:%S')
+    local ts
+    ts=$(format_timestamp)
     local icon=""
     
     case "$status" in
@@ -368,7 +375,15 @@ print_status() {
         info)    icon="ℹ️ " ;;
     esac
     
-    echo "[$timestamp] $icon $message"
+    echo "[$ts] $icon $message"
+}
+
+log_message() {
+    local level=$1
+    local message=$2
+    local ts
+    ts=$(format_timestamp)
+    echo "[$ts] [$level] $message"
 }
 
 get_incomplete_task_count() {
@@ -685,6 +700,74 @@ EOF
     print_status "info" "Escalation created: ${FEATURE_DIR}/.escalation_handoff.md"
 }
 
+# =====================================================
+# KILO EXECUTION WITH PENDING FILE DETECTION
+# =====================================================
+# Launches kilo in background, monitors for pending file,
+# and kills kilo once pending file appears (with grace period).
+# This prevents hanging when model finishes work but doesn't exit.
+
+run_kilo_with_pending_detection() {
+    local task_id="$1"
+    local prompt="$2"
+    local pending_file="$3"
+    
+    log_message "INFO" "Starting Kilo for task $task_id (background monitoring enabled)"
+    
+    set +e
+    local kilo_bin="$KILO_CMD"
+    $kilo_bin run --auto "$prompt" &
+    local kilo_pid=$!
+    set -e
+    
+    log_message "INFO" "Kilo PID: $kilo_pid, monitoring for $pending_file..."
+    
+    local pending_found=false
+    local pending_start_seconds=""
+    
+    await_kilo_or_kill_on_pending() {
+        if ! kill -0 $kilo_pid 2>/dev/null; then
+            wait $kilo_pid 2>/dev/null || true
+            local exit_code=$?
+            log_message "INFO" "Kilo exited on its own for task $task_id (exit code: $exit_code)"
+            if [[ "$pending_found" == "true" ]]; then
+                log_message "INFO" "Pending file was already created — task is done"
+            fi
+            echo "$exit_code"
+            return 0
+        fi
+        
+        if [[ "$pending_found" == "false" && -f "$pending_file" ]]; then
+            pending_found=true
+            pending_start_seconds=$(date +%s)
+            log_message "INFO" "Pending file detected for task $task_id — waiting ${PENDING_GRACE_SECONDS}s before kill"
+        fi
+        
+        if [[ "$pending_found" == "true" ]]; then
+            local now
+            now=$(date +%s)
+            local elapsed=$((now - pending_start_seconds))
+            if [[ $elapsed -ge $PENDING_GRACE_SECONDS ]]; then
+                log_message "INFO" "Grace period expired — killing Kilo (PID: $kilo_pid)"
+                kill $kilo_pid 2>/dev/null || true
+                wait $kilo_pid 2>/dev/null || true
+                log_message "INFO" "Kilo stopped after pending file was created"
+                echo "0"
+                return 0
+            fi
+        fi
+        
+        return 1
+    }
+    
+    while true; do
+        if await_kilo_or_kill_on_pending; then
+            return
+        fi
+        sleep 2
+    done
+}
+
 do_commit() {
     local feature_name="$1"
     local task_id="$2"
@@ -943,10 +1026,8 @@ main() {
         PROMPT=$(sed "s|\$REVIEW_RESULT_FILE|$safe_review_result|g" <<< "$PROMPT")
         PROMPT=$(printf '%s' "$PROMPT")
         
-        set +e
-        $KILO_CMD run --auto "$PROMPT"
-        local exit_code=$?
-        set -e
+        local exit_code
+        exit_code=$(run_kilo_with_pending_detection "$next_task" "$PROMPT" "$PENDING_TASKS_FILE")
         
         local escalation_file="${FEATURE_DIR}/.escalation_handoff.md"
         local escalation_file_alt="${PROJECT_ROOT}/.escalation_handoff.md"
