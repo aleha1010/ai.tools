@@ -930,6 +930,60 @@ execute_gate_command() {
 }
 #endregion
 
+#region Summarize command output for log
+summarize_output() {
+    local cmd_type="$1"
+    local output="$2"
+    local exit_code="$3"
+
+    if [[ -z "$output" ]]; then
+        local cmd_upper
+        cmd_upper=$(echo "$cmd_type" | tr '[:lower:]' '[:upper:]')
+        if [[ "$cmd_type" == "test" ]]; then
+            echo "[${cmd_upper}] exit=$exit_code passed=? failed=? skipped=?"
+        else
+            echo "[${cmd_upper}] exit=$exit_code errors=? warnings=?"
+        fi
+        return
+    fi
+
+    if [[ "$cmd_type" == "build" ]]; then
+        local errors warnings
+        local build_summary
+        build_summary=$(echo "$output" | grep -a -i -E '(error\(s\)|ошиб[а-я]+)' | tail -1) || [[ $? -eq 1 ]]
+        errors=$(echo "$build_summary" | grep -a -oE '[0-9]+' | head -1) || [[ $? -eq 1 ]]
+        # tail -1: warnings count is the LAST number on the warnings line
+        # (e.g. "0 Error(s) 293 Warning(s)" — 293 is last, "Предупреждений: 293" — only number)
+        warnings=$(echo "$output" | grep -a -i -E '(warning\(s\)|предупрежден[ияй])' | tail -1 | grep -a -oE '[0-9]+' | tail -1) || [[ $? -eq 1 ]]
+        echo "[BUILD] exit=$exit_code errors=${errors:-?} warnings=${warnings:-?}"
+
+    elif [[ "$cmd_type" == "test" ]]; then
+        local passed failed skipped
+        local summary_line
+        summary_line=$(echo "$output" | grep -a -i -E '(test run summary|итоги тестов)' | tail -1) || [[ $? -eq 1 ]]
+
+        if [[ -z "$summary_line" ]]; then
+            # Fallback 1: per-assembly summary lines (e.g. "Пройден! : пройдено N, не пройдено N, пропущено N")
+            summary_line=$(echo "$output" | grep -a -E '[Пп]ройден[!]?[ :]+не[ :]*пройден[оы]?' | tail -1) || [[ $? -eq 1 ]]
+        fi
+
+        if [[ -z "$summary_line" ]]; then
+            # Fallback 2: last 3 lines of output (e.g. coverlet table)
+            summary_line=$(echo "$output" | tail -3)
+        fi
+
+# Strip "не пройдено" / "failed" / "не пройден" from the line before
+        # extracting passed count — avoids matching "пройдено" inside "Не пройдено"
+        local clean_line
+        clean_line=$(echo "$summary_line" | sed 's/[Нн]е[ :]*пройден[оы]*[ :]*[0-9]*[, ]*//' | sed 's/[Ff]ailed[ :]*[0-9]*[, ]*//')
+        passed=$(echo "$clean_line" | grep -a -oE '(passed|[Пп]ройден[оы]?)[ :)]*[0-9]+' | grep -a -oE '[0-9]+' | tail -1) || [[ $? -eq 1 ]]
+        failed=$(echo "$summary_line" | grep -a -oE '(failed|[Нн]е?[ :]*пройден[оы]?)[ :)]*[0-9]+' | grep -a -oE '[0-9]+' | tail -1) || [[ $? -eq 1 ]]
+        skipped=$(echo "$summary_line" | grep -a -oE '(skipped|[Пп]ропущен[оы]?)[ :)]*[0-9]+' | grep -a -oE '[0-9]+' | tail -1) || [[ $? -eq 1 ]]
+        echo "[TEST] exit=$exit_code passed=${passed:-?} failed=${failed:-?} skipped=${skipped:-?}"
+    fi
+}
+#endregion
+
 #region Функции build/test gate
 run_build_test_gate() {
     local project_root="$1"
@@ -956,13 +1010,14 @@ run_build_test_gate() {
         local build_output
         build_output=$(execute_gate_command "$BUILD_COMMAND" 300 "build" 2>&1)
         local build_exit_code=$?
+        local build_summary
+        build_summary=$(summarize_output "build" "$build_output" $build_exit_code)
+        print_status "success" "$build_summary"
         
         if [[ $build_exit_code -ne 0 ]]; then
             print_status "error" "Build не прошёл (exit code: $build_exit_code)"
             echo "$build_output" | tail -50
             gate_failed=1
-        else
-            print_status "success" "Build прошёл успешно"
         fi
     else
         print_status "info" "Build gate: build_command не указан, пропущен"
@@ -973,13 +1028,14 @@ run_build_test_gate() {
         local test_output
         test_output=$(execute_gate_command "$TEST_COMMAND" 300 "test" 2>&1)
         local test_exit_code=$?
+        local test_summary
+        test_summary=$(summarize_output "test" "$test_output" $test_exit_code)
+        print_status "success" "$test_summary"
         
         if [[ $test_exit_code -ne 0 ]]; then
             print_status "error" "Тесты не прошли (exit code: $test_exit_code)"
             echo "$test_output" | tail -50
             gate_failed=1
-        else
-            print_status "success" "Тесты прошли успешно"
         fi
     elif [[ $gate_failed -eq 0 ]]; then
         print_status "info" "Test gate: test_command не указан, пропущен"

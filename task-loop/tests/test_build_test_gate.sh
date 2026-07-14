@@ -463,6 +463,136 @@ test_timeout_both_branches() {
 }
 
 # =====================================================
+# TESTS: summarize_output
+# =====================================================
+
+# Note: Source only the summarize_output function from task_loop.sh via sed,
+# isolated to avoid pulling in unbound variables from the main script.
+_source_summarize() {
+    eval "$(sed -n '/^#region Summarize command output for log/,/^#endregion/p' "$TASK_LOOP_SCRIPT")"
+}
+
+test_summarize_output_ru_build_success() {
+    _source_summarize
+    local result
+    result=$(summarize_output "build" "Сборка успешно завершена. Ошибок: 0, Предупреждений: 293" 0 2>&1) || true
+
+    if [[ "$result" == "[BUILD] exit=0 errors=0 warnings=293" ]]; then
+        return 0
+    fi
+    echo "FAIL: expected '[BUILD] exit=0 errors=0 warnings=293', got '$result'" >&2
+    return 1
+}
+
+test_summarize_output_en_build_success() {
+    _source_summarize
+    local result
+    result=$(summarize_output "build" "Build succeeded. 0 Error(s) 293 Warning(s)" 0 2>&1) || true
+
+    if [[ "$result" == "[BUILD] exit=0 errors=0 warnings=293" ]]; then
+        return 0
+    fi
+    echo "FAIL: expected '[BUILD] exit=0 errors=0 warnings=293', got '$result'" >&2
+    return 1
+}
+
+test_summarize_output_build_failed() {
+    _source_summarize
+    local result
+    result=$(summarize_output "build" "Build FAILED. 2 Error(s) 5 Warning(s)" 1 2>&1) || true
+
+    if [[ "$result" == "[BUILD] exit=1 errors=2 warnings=5" ]]; then
+        return 0
+    fi
+    echo "FAIL: expected '[BUILD] exit=1 errors=2 warnings=5', got '$result'" >&2
+    return 1
+}
+
+test_summarize_output_ru_test_success() {
+    _source_summarize
+    local result
+    result=$(summarize_output "test" "Итоги тестов: Пройдено: 45, Не пройдено: 0, Пропущено: 5" 0 2>&1) || true
+
+    if [[ "$result" == "[TEST] exit=0 passed=45 failed=0 skipped=5" ]]; then
+        return 0
+    fi
+    echo "FAIL: expected '[TEST] exit=0 passed=45 failed=0 skipped=5', got '$result'" >&2
+    return 1
+}
+
+test_summarize_output_en_test_success() {
+    _source_summarize
+    local result
+    result=$(summarize_output "test" "Test Run Summary: passed: 45, failed: 0, skipped: 5" 0 2>&1) || true
+
+    if [[ "$result" == "[TEST] exit=0 passed=45 failed=0 skipped=5" ]]; then
+        return 0
+    fi
+    echo "FAIL: expected '[TEST] exit=0 passed=45 failed=0 skipped=5', got '$result'" >&2
+    return 1
+}
+
+test_summarize_output_non_dotnet_fallback() {
+    _source_summarize
+    local result
+    result=$(summarize_output "test" "ok" 0 2>&1) || true
+
+    if [[ "$result" == "[TEST] exit=0 passed=? failed=? skipped=?" ]]; then
+        return 0
+    fi
+    echo "FAIL: expected '[TEST] exit=0 passed=? failed=? skipped=?', got '$result'" >&2
+    return 1
+}
+
+test_summarize_output_empty_build() {
+    _source_summarize
+    local result
+    result=$(summarize_output "build" "" 0 2>&1) || true
+
+    if [[ "$result" == "[BUILD] exit=0 errors=? warnings=?" ]]; then
+        return 0
+    fi
+    echo "FAIL: expected '[BUILD] exit=0 errors=? warnings=?', got '$result'" >&2
+    return 1
+}
+
+test_summarize_output_empty_test() {
+    _source_summarize
+    local result
+    result=$(summarize_output "test" "" 0 2>&1) || true
+
+    if [[ "$result" == "[TEST] exit=0 passed=? failed=? skipped=?" ]]; then
+        return 0
+    fi
+    echo "FAIL: expected '[TEST] exit=0 passed=? failed=? skipped=?', got '$result'" >&2
+    return 1
+}
+
+test_summarize_output_build_no_summary_line() {
+    _source_summarize
+    local result
+    result=$(summarize_output "build" "Build succeeded." 0 2>&1) || true
+
+    if [[ "$result" == "[BUILD] exit=0 errors=? warnings=?" ]]; then
+        return 0
+    fi
+    echo "FAIL: expected '[BUILD] exit=0 errors=? warnings=?', got '$result'" >&2
+    return 1
+}
+
+test_summarize_output_incomplete_test_summary() {
+    _source_summarize
+    local result
+    result=$(summarize_output "test" "Test Run Summary: passed: 45, failed: 0" 0 2>&1) || true
+
+    if [[ "$result" == "[TEST] exit=0 passed=45 failed=0 skipped=?" ]]; then
+        return 0
+    fi
+    echo "FAIL: expected '[TEST] exit=0 passed=45 failed=0 skipped=?', got '$result'" >&2
+    return 1
+}
+
+# =====================================================
 # Main
 # =====================================================
 
@@ -500,6 +630,17 @@ main() {
     run_test "build skipped when no build_command" test_build_skip_when_no_build_command
     run_test "test skipped after build failure" test_test_skipped_after_build_failure
     run_test "main loop saves TEST_FAILED state" test_main_loop_saves_test_failed_state
+
+    run_test "summarize_output: русский build success" test_summarize_output_ru_build_success
+    run_test "summarize_output: английский build success" test_summarize_output_en_build_success
+    run_test "summarize_output: build failed" test_summarize_output_build_failed
+    run_test "summarize_output: русский test success" test_summarize_output_ru_test_success
+    run_test "summarize_output: английский test success" test_summarize_output_en_test_success
+    run_test "summarize_output: не-dotnet fallback" test_summarize_output_non_dotnet_fallback
+    run_test "summarize_output: empty build output" test_summarize_output_empty_build
+    run_test "summarize_output: empty test output" test_summarize_output_empty_test
+    run_test "summarize_output: build без Error(s)/Warning(s)" test_summarize_output_build_no_summary_line
+    run_test "summarize_output: неполная test summary" test_summarize_output_incomplete_test_summary
     echo ""
     echo "========================================"
     echo "Результаты:"
