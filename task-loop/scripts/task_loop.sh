@@ -816,50 +816,179 @@ extract_feature_name() {
 }
 #endregion
 
-#region Функции automated test gate
-run_test_gate() {
-    local project_root="$1"
+#region Функции конфигурации build/test gate (.kilo/task_loop.yaml)
+read_task_loop_config() {
+    local config_file="${PROJECT_ROOT}/.kilo/task_loop.yaml"
     
-    local test_cmd=""
-    local test_desc=""
-    
-    if [[ -f "$project_root/package.json" ]]; then
-        if jq -e '.scripts.test' "$project_root/package.json" >/dev/null 2>&1; then
-            test_cmd="npm test"
-            test_desc="npm test"
-        fi
-    elif [[ -n "$(find "$project_root" -maxdepth 2 -name "*.csproj" -print -quit 2>/dev/null)" ]]; then
-        test_cmd="dotnet test --no-build 2>/dev/null || dotnet test"
-        test_desc="dotnet test"
-    elif [[ -f "$project_root/pytest.ini" ]] || [[ -f "$project_root/setup.py" ]] || [[ -n "$(find "$project_root" -maxdepth 2 -name 'conftest.py' -print -quit 2>/dev/null)" ]]; then
-        test_cmd="pytest"
-        test_desc="pytest"
-    elif [[ -f "$project_root/Cargo.toml" ]]; then
-        test_cmd="cargo test"
-        test_desc="cargo test"
-    elif [[ -f "$project_root/go.mod" ]]; then
-        test_cmd="go test ./..."
-        test_desc="go test"
-    fi
-    
-    if [[ -z "$test_cmd" ]]; then
-        print_status "info" "Test gate: тип проекта не определён, тесты пропущены"
-        return 0
-    fi
-    
-    print_phase "TEST GATE" "Запуск: $test_desc"
-    
-    set +e
-    eval "$test_cmd" 2>&1
-    local test_exit_code=$?
-    set -e
-    
-    if [[ $test_exit_code -ne 0 ]]; then
-        print_status "error" "Тесты не прошли (exit code: $test_exit_code)"
+    if [[ ! -f "$config_file" ]]; then
+        print_status "info" "Конфиг .kilo/task_loop.yaml не найден"
         return 1
     fi
     
-    print_status "success" "Тесты прошли ($test_desc)"
+    # Extract build_command: "value" (double quotes)
+    BUILD_COMMAND=$(sed -n 's/^build_command: *"\(.*\)"/\1/p' "$config_file" | head -1)
+    
+    # Fallback: build_command: 'value' (single quotes)
+    if [[ -z "$BUILD_COMMAND" ]]; then
+        BUILD_COMMAND=$(sed -n "s/^build_command: *'\(.*\)'/\1/p" "$config_file" | head -1)
+    fi
+    
+    # Fallback: build_command: value (unquoted, strip inline comments)
+    if [[ -z "$BUILD_COMMAND" ]]; then
+        BUILD_COMMAND=$(sed -n 's/^build_command: *\([^#]*\).*/\1/p' "$config_file" | head -1 | sed 's/^ *//;s/ *$//')
+    fi
+    
+    # Same for test_command
+    TEST_COMMAND=$(sed -n 's/^test_command: *"\(.*\)"/\1/p' "$config_file" | head -1)
+    
+    if [[ -z "$TEST_COMMAND" ]]; then
+        TEST_COMMAND=$(sed -n "s/^test_command: *'\(.*\)'/\1/p" "$config_file" | head -1)
+    fi
+    
+    # Handle explicit null
+    if grep -q '^test_command: *null' "$config_file" 2>/dev/null; then
+        TEST_COMMAND=""
+    fi
+    
+    return 0
+}
+
+print_config_instruction() {
+    local project_root="$1"
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║   .kilo/task_loop.yaml не найден                            ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "Чтобы включить автоматическую проверку сборки и тестов,"
+    echo "создай файл .kilo/task_loop.yaml со следующим содержимым:"
+    echo ""
+    echo "  build_command: \"dotnet build <solution-name>.sln\""
+    echo "  test_command: \"dotnet test <solution-name>.sln\""
+    echo ""
+    echo "Инструкция для агента:"
+    echo "  1. Найди .sln файл в корне проекта"
+    echo "  2. Создай .kilo/task_loop.yaml с build_command и test_command"
+    echo "  3. Если тесты не нужны (фронтенд без тестов), укажи test_command: null"
+    echo ""
+    echo "Примеры:"
+    echo "  .NET с солюшеном:"
+    echo "    build_command: \"dotnet build MyApp.sln\""
+    echo "    test_command: \"dotnet test MyApp.sln\""
+    echo ""
+    echo "  Фронтенд без тестов:"
+    echo "    build_command: \"npm run build\""
+    echo "    test_command: null"
+    echo ""
+    echo "Путь: ${project_root}/.kilo/task_loop.yaml"
+}
+
+execute_gate_command() {
+    local cmd="$1"
+    local timeout_seconds="${2:-300}"
+    local description="${3:-command}"
+    
+    # Validate: extract first word (base command) and check whitelist
+    local base_cmd
+    base_cmd=$(echo "$cmd" | sed 's/ .*//')
+    case "$base_cmd" in
+        dotnet|npm|npx|make|cargo|go|pytest|gradle|mvn|node) ;;
+        *)
+            print_status "error" "Недопустимая команда: '$base_cmd'"
+            return 1
+            ;;
+    esac
+    
+    # Validate entire command string: only safe characters allowed
+    # Safe: alphanumeric, space, /, ., -, _, :, =, @
+    # grep pattern: - at end to avoid macOS range issue
+    if echo "$cmd" | grep -q '[^][a-zA-Z0-9 /._:@=-]'; then
+        print_status "error" "Команда содержит недопустимые символы (; | $ \` {} () < > ! \ и др.)"
+        print_status "error" "Команда: $cmd"
+        return 1
+    fi
+    
+    if [[ -n "$timeout_cmd" ]]; then
+        print_status "info" "Выполнение $description: $cmd (timeout: ${timeout_seconds}s)"
+    else
+        print_status "info" "Выполнение $description: $cmd (без таймаута)"
+    fi
+    set +e
+    if [[ -n "$timeout_cmd" ]]; then
+        $timeout_cmd "$timeout_seconds" sh -c "$cmd" 2>&1
+    else
+        sh -c "$cmd" 2>&1
+    fi
+    local exit_code=$?
+    set -e
+    
+    if [[ -n "$timeout_cmd" && $exit_code -eq 124 ]]; then
+        print_status "error" "$description превысил таймаут (${timeout_seconds}s)"
+    fi
+    
+    return $exit_code
+}
+#endregion
+
+#region Функции build/test gate
+run_build_test_gate() {
+    local project_root="$1"
+    local config_file="${project_root}/.kilo/task_loop.yaml"
+    
+    # timeout опционален: если доступен — используем, если нет — выполняем без таймаута
+    local timeout_cmd=""
+    if command -v timeout >/dev/null 2>&1; then
+        timeout_cmd="timeout"
+    else
+        print_status "info" "timeout не найден, команды будут выполняться без таймаута"
+    fi
+    
+    if ! read_task_loop_config; then
+        print_config_instruction "$project_root"
+        print_status "info" "Build/test gate: конфиг не найден, gates пропущены"
+        return 0
+    fi
+    
+    local gate_failed=0
+    
+    if [[ -n "$BUILD_COMMAND" ]]; then
+        print_phase "BUILD GATE" "Запуск: $BUILD_COMMAND"
+        local build_output
+        build_output=$(execute_gate_command "$BUILD_COMMAND" 300 "build" 2>&1)
+        local build_exit_code=$?
+        
+        if [[ $build_exit_code -ne 0 ]]; then
+            print_status "error" "Build не прошёл (exit code: $build_exit_code)"
+            echo "$build_output" | tail -50
+            gate_failed=1
+        else
+            print_status "success" "Build прошёл успешно"
+        fi
+    else
+        print_status "info" "Build gate: build_command не указан, пропущен"
+    fi
+    
+    if [[ $gate_failed -eq 0 && -n "$TEST_COMMAND" ]]; then
+        print_phase "TEST GATE" "Запуск: $TEST_COMMAND"
+        local test_output
+        test_output=$(execute_gate_command "$TEST_COMMAND" 300 "test" 2>&1)
+        local test_exit_code=$?
+        
+        if [[ $test_exit_code -ne 0 ]]; then
+            print_status "error" "Тесты не прошли (exit code: $test_exit_code)"
+            echo "$test_output" | tail -50
+            gate_failed=1
+        else
+            print_status "success" "Тесты прошли успешно"
+        fi
+    elif [[ $gate_failed -eq 0 ]]; then
+        print_status "info" "Test gate: test_command не указан, пропущен"
+    fi
+    
+    if [[ $gate_failed -ne 0 ]]; then
+        return 1
+    fi
+    
     return 0
 }
 #endregion
@@ -1113,7 +1242,7 @@ main() {
         # TEST GATE: Автоматический запуск тестов
         # =====================================================
         
-        if ! run_test_gate "$PROJECT_ROOT"; then
+        if ! run_build_test_gate "$PROJECT_ROOT"; then
             print_status "error" "Test gate не пройден для задачи $next_task"
             save_state "TEST_FAILED" "$iteration" "$next_task"
             ((iteration++))

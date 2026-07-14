@@ -2010,6 +2010,7 @@ SCRIPT
     fi
 }
 
+
 # =====================================================
 # ЗАПУСК ТЕСТОВ
 
@@ -2212,7 +2213,10 @@ main() {
     run_test "run_test_gate: неизвестный проект пропускается" test_run_test_gate_unknown_project_skips
     run_test "run_test_gate: приоритет npm > dotnet" test_run_test_gate_priority_npm_over_dotnet
     run_test "run_test_gate: pytest (conftest.py) определяется" test_run_test_gate_conftest_py_detected
-    run_test "run_test_gate: pytest (setup.py) определяется" test_run_test_gate_setup_py_detected
+        run_test "run_test_gate: pytest (setup.py) определяется" test_run_test_gate_setup_py_detected
+    
+    # Тесты YAML parsing (build/test gate)
+
     
     echo ""
     echo "========================================"
@@ -2246,6 +2250,10 @@ main() {
     
     if [[ -f "$script_dir/test_new_functions.sh" ]]; then
         bash "$script_dir/test_new_functions.sh" || exit 1
+    fi
+    
+    if [[ -f "$script_dir/test_build_test_gate.sh" ]]; then
+        bash "$script_dir/test_build_test_gate.sh" || exit 1
     fi
     
     echo ""
