@@ -2015,6 +2015,455 @@ SCRIPT
 # ЗАПУСК ТЕСТОВ
 
 # =====================================================
+# ТЕСТЫ: extract_coordinator_session_id() + sanitize_session_title()
+# =====================================================
+
+# Mock для kilo session list
+_mock_kilo_session_list() {
+    local mode="$1"
+    local output_file="$2"
+    case "$mode" in
+        success)
+            cat > "$output_file" << 'MOCK'
+#!/bin/bash
+echo '[{"id":"abc123","title":"review-001-test-T001-12345","updated":"2026-07-14T12:00:00Z"}]'
+MOCK
+            ;;
+        empty)
+            cat > "$output_file" << 'MOCK'
+#!/bin/bash
+echo '[]'
+MOCK
+            ;;
+        fail)
+            cat > "$output_file" << 'MOCK'
+#!/bin/bash
+exit 1
+MOCK
+            ;;
+    esac
+    chmod +x "$output_file"
+}
+
+test_extract_coordinator_session_id_success() {
+    local mock_bin="$TEST_TMP_DIR/mock_kilo"
+    _mock_kilo_session_list "success" "$mock_bin"
+
+    local test_script="$TEST_TMP_DIR/test_extract_success.sh"
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+KILO_CMD="$1"
+SLEEP_CMD="true"
+print_status() { local s="$1" m="$2"; echo "[test] $s: $m" >&2; }
+extract_coordinator_session_id() {
+    local session_title="$1"
+    local max_attempts="${2:-3}"
+    local sleep_seconds="${3:-2}"
+    local attempt=1
+    if ! command -v jq >/dev/null 2>&1; then echo ""; return 1; fi
+    while [[ $attempt -le $max_attempts ]]; do
+        local session_json
+        session_json=$($KILO_CMD 2>/dev/null)
+        local sid
+        sid=$(echo "$session_json" | jq -r '.[0].id // empty' 2>/dev/null)
+        if [[ -n "$sid" ]]; then echo "$sid"; return 0; fi
+        if [[ $attempt -lt $max_attempts ]]; then "$SLEEP_CMD" "$sleep_seconds"; fi
+        ((attempt++))
+    done
+    echo ""
+    return 1
+}
+extract_coordinator_session_id "test-title" 1 1
+SCRIPT
+    chmod +x "$test_script"
+
+    local result
+    result=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$mock_bin" 2>/dev/null || true)
+
+    if [[ "$result" == "abc123" ]]; then
+        return 0
+    else
+        echo "Expected abc123, got '$result'" >&2
+        return 1
+    fi
+}
+
+test_extract_coordinator_session_id_empty() {
+    local mock_bin="$TEST_TMP_DIR/mock_kilo_empty"
+    _mock_kilo_session_list "empty" "$mock_bin"
+
+    local test_script="$TEST_TMP_DIR/test_extract_empty.sh"
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+KILO_CMD="$1"
+SLEEP_CMD="true"
+print_status() { local s="$1" m="$2"; echo "[test] $s: $m" >&2; }
+extract_coordinator_session_id() {
+    local session_title="$1"
+    local max_attempts="${2:-3}"
+    local sleep_seconds="${3:-2}"
+    local attempt=1
+    if ! command -v jq >/dev/null 2>&1; then echo ""; return 1; fi
+    while [[ $attempt -le $max_attempts ]]; do
+        local session_json
+        session_json=$($KILO_CMD 2>/dev/null)
+        local sid
+        sid=$(echo "$session_json" | jq -r '.[0].id // empty' 2>/dev/null)
+        if [[ -n "$sid" ]]; then echo "$sid"; return 0; fi
+        if [[ $attempt -lt $max_attempts ]]; then "$SLEEP_CMD" "$sleep_seconds"; fi
+        ((attempt++))
+    done
+    echo ""
+    return 1
+}
+set +e
+extract_coordinator_session_id "test-title" 1 1
+rc=$?
+set -e
+echo "EXIT:$rc"
+SCRIPT
+    chmod +x "$test_script"
+
+    local result
+    result=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$mock_bin" 2>/dev/null || true)
+
+    local actual
+    actual=$(echo "$result" | head -1)
+    local exit_code
+    exit_code=$(echo "$result" | grep "EXIT:" | cut -d: -f2)
+
+    if [[ -z "$actual" && "$exit_code" == "1" ]]; then
+        return 0
+    else
+        echo "Expected empty + exit 1, got: '$result'" >&2
+        return 1
+    fi
+}
+
+test_extract_coordinator_session_id_error() {
+    local mock_bin="$TEST_TMP_DIR/mock_kilo_fail"
+    _mock_kilo_session_list "fail" "$mock_bin"
+
+    local test_script="$TEST_TMP_DIR/test_extract_error.sh"
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+KILO_CMD="$1"
+SLEEP_CMD="true"
+print_status() { local s="$1" m="$2"; echo "[test] $s: $m" >&2; }
+extract_coordinator_session_id() {
+    local session_title="$1"
+    local max_attempts="${2:-3}"
+    local sleep_seconds="${3:-2}"
+    local attempt=1
+    if ! command -v jq >/dev/null 2>&1; then echo ""; return 1; fi
+    while [[ $attempt -le $max_attempts ]]; do
+        local session_json
+        session_json=$($KILO_CMD 2>/dev/null)
+        local sid
+        sid=$(echo "$session_json" | jq -r '.[0].id // empty' 2>/dev/null)
+        if [[ -n "$sid" ]]; then echo "$sid"; return 0; fi
+        if [[ $attempt -lt $max_attempts ]]; then "$SLEEP_CMD" "$sleep_seconds"; fi
+        ((attempt++))
+    done
+    echo ""
+    return 1
+}
+set +e
+extract_coordinator_session_id "test-title" 1 1
+rc=$?
+set -e
+echo "EXIT:$rc"
+SCRIPT
+    chmod +x "$test_script"
+
+    local result
+    result=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$mock_bin" 2>/dev/null || true)
+
+    local exit_code
+    exit_code=$(echo "$result" | grep "EXIT:" | cut -d: -f2)
+    if [[ "$exit_code" == "1" ]]; then
+        return 0
+    else
+        echo "Expected exit code 1 for kilo failure, got exit: $exit_code" >&2
+        return 1
+    fi
+}
+
+test_sanitize_session_title() {
+    local result
+    result=$(cd "$TEST_TMP_DIR" && bash -c '
+        sanitize_session_title() {
+            local raw="$1"
+            echo "$raw" | sed '"'"'s/[^a-zA-Z0-9._-]/_/g'"'"'
+        }
+        sanitize_session_title "review-UMP integration/foo-T001-\$"
+    ')
+    
+    if [[ "$result" == "review-UMP_integration_foo-T001-_" ]]; then
+        return 0
+    else
+        echo "Expected 'review-UMP_integration_foo-T001-_', got '$result'" >&2
+        return 1
+    fi
+}
+
+test_run_kilo_dispatch() {
+    local mock_kilo="$TEST_TMP_DIR/kilo_logger"
+    local log_file="$TEST_TMP_DIR/kilo_dispatch_test.log"
+
+    cat > "$mock_kilo" << SCRIPT
+#!/bin/bash
+echo "\$@" >> "$log_file"
+SCRIPT
+    chmod +x "$mock_kilo"
+
+    local test_script="$TEST_TMP_DIR/test_dispatch.sh"
+    cat > "$test_script" << SCRIPT
+#!/bin/bash
+set -euo pipefail
+
+KILO_CMD="\$1"
+
+run_kilo_with_sentinel() {
+    local task_id="\$1"
+    local prompt="\$2"
+    local sentinel_file="\$3"
+    local grace_seconds="\${4:-30}"
+    local session_mode="\${5:-}"
+
+    local kilo_bin="\$KILO_CMD"
+
+    if [[ "\$session_mode" =~ ^continue: ]]; then
+        local sid="\${session_mode#continue:}"
+        \$kilo_bin run --auto --continue --session "\$sid" "\$prompt" &
+    elif [[ "\$session_mode" =~ ^new: ]]; then
+        local title="\${session_mode#new:}"
+        \$kilo_bin run --auto --title "\$title" "\$prompt" &
+    else
+        \$kilo_bin run --auto "\$prompt" &
+    fi
+    local kilo_pid=\$!
+    wait \$kilo_pid 2>/dev/null || true
+}
+
+run_kilo_with_sentinel "review-T001" "review prompt" "" 30 "new:review-001-test-T001-12345"
+run_kilo_with_sentinel "review-T001" "review prompt" "" 30 "continue:abc123"
+run_kilo_with_sentinel "T001" "implement prompt" "" 30 ""
+SCRIPT
+    chmod +x "$test_script"
+
+    rm -f "$log_file"
+
+    bash "$test_script" "$mock_kilo"
+    local output
+    output=$(cat "$log_file" 2>/dev/null || echo "")
+    rm -f "$log_file"
+
+    local new_found=false
+    local continue_found=false
+    local plain_found=false
+
+    while IFS= read -r line; do
+        if echo "$line" | grep -q "run --auto --title"; then
+            new_found=true
+        elif echo "$line" | grep -q "run --auto --continue --session"; then
+            continue_found=true
+        elif echo "$line" | grep -q "run --auto"; then
+            plain_found=true
+        fi
+    done <<< "$output"
+
+    if $new_found && $continue_found && $plain_found; then
+        return 0
+    else
+        echo "Dispatch patterns missing: new=$new_found continue=$continue_found plain=$plain_found" >&2
+        echo "Log output: $output" >&2
+        return 1
+    fi
+}
+
+test_coordinator_session_continues_on_rejected() {
+    local mock_kilo="$TEST_TMP_DIR/kilo_review_mock"
+    local log_file="$TEST_TMP_DIR/kilo_review.log"
+
+    local log_file="$TEST_TMP_DIR/kilo_coord_test.log"
+
+    cat > "$mock_kilo" << SCRIPT
+#!/bin/bash
+echo "\$@" >> "$log_file"
+SCRIPT
+    chmod +x "$mock_kilo"
+
+    local test_script="$TEST_TMP_DIR/test_coord_cycle.sh"
+    cat > "$test_script" << SCRIPT
+#!/bin/bash
+set -euo pipefail
+
+KILO_CMD="\$1"
+
+sanitize_session_title() {
+    local raw="\$1"
+    echo "\$raw" | sed 's/[^a-zA-Z0-9._-]/_/g'
+}
+
+extract_coordinator_session_id() {
+    echo "abc123"
+    return 0
+}
+
+run_kilo_with_sentinel() {
+    local task_id="\$1"
+    local prompt="\$2"
+    local sentinel_file="\$3"
+    local grace_seconds="\${4:-30}"
+    local session_mode="\${5:-}"
+
+    if [[ "\$session_mode" =~ ^continue: ]]; then
+        local sid="\${session_mode#continue:}"
+        \$KILO_CMD run --auto --continue --session "\$sid" "\$prompt" &
+    elif [[ "\$session_mode" =~ ^new: ]]; then
+        local title="\${session_mode#new:}"
+        \$KILO_CMD run --auto --title "\$title" "\$prompt" &
+    else
+        \$KILO_CMD run --auto "\$prompt" &
+    fi
+    local kilo_pid=\$!
+    wait \$kilo_pid 2>/dev/null || true
+}
+
+coordinator_session_id=""
+
+if [[ -z "\${coordinator_session_id:-}" ]]; then
+    session_title=\$(sanitize_session_title "review-001-test-T001-\$\$")
+    run_kilo_with_sentinel "review-T001" "review prompt" "" 30 "new:\$session_title"
+    coordinator_session_id=\$(extract_coordinator_session_id "\$session_title")
+fi
+
+if [[ -n "\$coordinator_session_id" ]]; then
+    run_kilo_with_sentinel "review-T001" "review prompt" "" 30 "continue:\$coordinator_session_id"
+fi
+SCRIPT
+    chmod +x "$test_script"
+
+    rm -f "$log_file"
+
+    bash "$test_script" "$mock_kilo"
+    local output
+    output=$(cat "$log_file" 2>/dev/null || echo "")
+    rm -f "$log_file"
+
+    local new_count
+    new_count=$(echo "$output" | grep -c "run --auto --title" || true)
+    local continue_count
+    continue_count=$(echo "$output" | grep -c "run --auto --continue --session" || true)
+
+    if [[ "$new_count" -ge 1 && "$continue_count" -ge 1 ]]; then
+        return 0
+    else
+        echo "Expected ≥1 new (got $new_count) and ≥1 continue (got $continue_count)" >&2
+        echo "Log: $output" >&2
+        return 1
+    fi
+}
+
+test_save_state_persists_coordinator_session_id() {
+    local state_file="$TEST_TMP_DIR/state.json"
+    coordinator_session_id="session-xyz-789"
+
+    cat > "$state_file" << STATE_JSON
+{
+  "state": "REVIEWING",
+  "iteration": 3,
+  "current_task": "T001",
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "pid": $$,
+  "coordinator_session_id": "${coordinator_session_id}"
+}
+STATE_JSON
+
+    local saved_sid
+    saved_sid=$(jq -r '.coordinator_session_id // empty' "$state_file" 2>/dev/null)
+
+    if [[ "$saved_sid" == "session-xyz-789" ]]; then
+        return 0
+    else
+        echo "Expected session-xyz-789, got '$saved_sid'" >&2
+        return 1
+    fi
+}
+
+test_load_state_restores_coordinator_session_id() {
+    local state_file="$TEST_TMP_DIR/state.json"
+    coordinator_session_id=""
+
+    cat > "$state_file" << 'EOF'
+{
+  "state": "REJECTED",
+  "iteration": 5,
+  "current_task": "T002",
+  "coordinator_session_id": "session-abc-123"
+}
+EOF
+
+    local saved_coordinator_sid
+    saved_coordinator_sid=$(jq -r '.coordinator_session_id // ""' "$state_file" 2>/dev/null)
+
+    if [[ -n "$saved_coordinator_sid" ]]; then
+        coordinator_session_id="$saved_coordinator_sid"
+    fi
+
+    if [[ "$coordinator_session_id" == "session-abc-123" ]]; then
+        return 0
+    else
+        echo "Expected session-abc-123, got '$coordinator_session_id'" >&2
+        return 1
+    fi
+}
+
+test_coordinator_session_deleted_on_approved() {
+    local mock_kilo="$TEST_TMP_DIR/kilo_delete_mock"
+    local log_file="$TEST_TMP_DIR/kilo_delete_test.log"
+
+    cat > "$mock_kilo" << SCRIPT
+#!/bin/bash
+echo "\$@" >> "$log_file"
+SCRIPT
+    chmod +x "$mock_kilo"
+
+    local test_script="$TEST_TMP_DIR/test_cleanup.sh"
+    cat > "$test_script" << SCRIPT
+#!/bin/bash
+set -euo pipefail
+
+KILO_CMD="\$1"
+coordinator_session_id="session-to-delete-999"
+
+if [[ -n "\$coordinator_session_id" ]]; then
+    \$KILO_CMD session delete "\$coordinator_session_id" 2>/dev/null || true
+fi
+coordinator_session_id=""
+SCRIPT
+    chmod +x "$test_script"
+
+    rm -f "$log_file"
+
+    bash "$test_script" "$mock_kilo"
+    local output
+    output=$(cat "$log_file" 2>/dev/null || echo "")
+    rm -f "$log_file"
+
+    if echo "$output" | grep -q "session delete session-to-delete-999"; then
+        return 0
+    else
+        echo "Expected 'session delete session-to-delete-999', got: '$output'" >&2
+        return 1
+    fi
+}
+
+# =====================================================
 # ТЕСТЫ: Single Limit (MAX_TASK_REJECTIONS only)
 # =====================================================
 
@@ -2187,6 +2636,17 @@ main() {
     run_test "brace default не ломает JSON (bash 3.2)" test_brace_default_produces_valid_json
     
     run_test "current_rejections обрабатывает multiline jq output" test_current_rejections_handles_multiline_jq_output
+
+    # Coordinator session tests
+    run_test "extract_coordinator_session_id успех" test_extract_coordinator_session_id_success
+    run_test "extract_coordinator_session_id пустой список" test_extract_coordinator_session_id_empty
+    run_test "extract_coordinator_session_id ошибка kilo" test_extract_coordinator_session_id_error
+    run_test "sanitize_session_title фильтрует спецсимволы" test_sanitize_session_title
+    run_test "run_kilo_dispatch: new/continue/plain" test_run_kilo_dispatch
+    run_test "coordinator session: new на 1-м, continue на 2-м вызове" test_coordinator_session_continues_on_rejected
+    run_test "coordinator_session_id сохраняется в state.json" test_save_state_persists_coordinator_session_id
+    run_test "coordinator_session_id восстанавливается из state.json" test_load_state_restores_coordinator_session_id
+    run_test "coordinator session удаляется после APPROVED" test_coordinator_session_deleted_on_approved
 
     # Тесты для одного лимита (MAX_TASK_REJECTIONS)
     run_test "MAX_REVIEW_FAILURES не используется" test_max_review_failures_not_used

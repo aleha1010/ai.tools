@@ -509,6 +509,7 @@ save_state() {
   "current_task": "$current_task",
   "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
   "pid": $$,
+  "coordinator_session_id": "${coordinator_session_id:-}",
   "review_retries": ${review_retries:-0},
   "tasks_completed": ${tasks_completed:-0},
   "total_attempts": ${total_attempts:-0},
@@ -557,6 +558,10 @@ load_state() {
     saved_failed_tasks=$(jq -r '.failed_tasks // []' "$STATE_FILE" 2>/dev/null)
     local saved_rejection_counts
     saved_rejection_counts=$(jq -r '.task_rejection_counts // {}' "$STATE_FILE" 2>/dev/null)
+    local saved_current_task
+    saved_current_task=$(jq -r '.current_task // empty' "$STATE_FILE" 2>/dev/null)
+    local saved_coordinator_sid
+    saved_coordinator_sid=$(jq -r '.coordinator_session_id // ""' "$STATE_FILE" 2>/dev/null)
     
     iteration=${saved_iteration:-0}
     review_retries=${saved_review_retries:-0}
@@ -568,6 +573,22 @@ load_state() {
     failed_tasks="${saved_failed_tasks:-[]}"
     local _empty_json='{}'
     task_rejection_counts="${saved_rejection_counts:-$_empty_json}"
+    
+    if [[ -n "$saved_coordinator_sid" ]]; then
+        coordinator_session_id="$saved_coordinator_sid"
+        print_status "info" "Восстановлена coordinator session: $coordinator_session_id"
+    elif [[ -n "$saved_current_task" ]] && [[ "$saved_state" == "REJECTED" ]]; then
+        local fb_feature
+        fb_feature=$(extract_feature_name "$TASKS_PATH" 2>/dev/null || echo "unknown")
+        local fb_title
+        fb_title=$(sanitize_session_title "review-${fb_feature}-${saved_current_task}-*")
+        coordinator_session_id=$(extract_coordinator_session_id "$fb_title" 3 2 2>/dev/null || echo "")
+        if [[ -n "$coordinator_session_id" ]]; then
+            print_status "info" "Восстановлена coordinator session (fallback): $coordinator_session_id"
+        else
+            print_status "info" "Coordinator session не найдена — будет создана новая"
+        fi
+    fi
     
     print_status "info" "Восстановление состояния: iteration=$iteration, tasks_completed=$tasks_completed, consecutive_failures=$consecutive_failures"
     
@@ -612,9 +633,27 @@ run_review_gate() {
     PROMPT=$(sed "s|\$TASK_FILE_PATH|$safe_task_file_path|g" <<< "$PROMPT")
     PROMPT=$(sed "s|\$PRD_PATH|$safe_prd_path|g" <<< "$PROMPT")
     
+    local feature_name
+    feature_name=$(extract_feature_name "$TASKS_PATH")
+    local session_title
+    session_title=$(sanitize_session_title "review-${feature_name}-${task_id}-$$")
+    
     set +e
-    run_kilo_with_sentinel "review-$task_id" "$PROMPT" "$REVIEW_RESULT_FILE" "$PENDING_GRACE_SECONDS"
+    if [[ -n "${coordinator_session_id:-}" ]]; then
+        run_kilo_with_sentinel "review-$task_id" "$PROMPT" "$REVIEW_RESULT_FILE" "$PENDING_GRACE_SECONDS" "continue:$coordinator_session_id"
+    else
+        run_kilo_with_sentinel "review-$task_id" "$PROMPT" "$REVIEW_RESULT_FILE" "$PENDING_GRACE_SECONDS" "new:$session_title"
+    fi
     local exit_code=$?
+    
+    if [[ -z "$coordinator_session_id" ]] && [[ -f "$REVIEW_RESULT_FILE" ]]; then
+        local sid
+        sid=$(extract_coordinator_session_id "$session_title")
+        if [[ -n "$sid" ]]; then
+            coordinator_session_id="$sid"
+            print_status "info" "Coordinator session: $coordinator_session_id"
+        fi
+    fi
     # Do NOT re-enable errexit here — the caller manages it.
     # Re-enabling errexit inside this function causes return 1 to kill the script
     # even though the caller did set +e before calling us.
@@ -732,7 +771,7 @@ _monitor_kilo() {
 
         local deadline=$(($(date +%s) + grace_seconds))
         while [[ $(date +%s) -lt $deadline ]]; do
-            sleep 0.5
+            $SLEEP_CMD 0.5
             if ! kill -0 $kilo_pid 2>/dev/null; then
                 wait $kilo_pid 2>/dev/null; local rc=$?; true
                 printf -v "$kilo_exit_code_var" '%s' "$rc"
@@ -757,6 +796,7 @@ run_kilo_with_sentinel() {
     local prompt="$2"
     local sentinel_file="$3"
     local grace_seconds="${4:-$PENDING_GRACE_SECONDS}"
+    local session_mode="${5:-}"
 
     log_message "INFO" "Starting Kilo for task $task_id (background monitoring enabled)"
 
@@ -764,7 +804,17 @@ run_kilo_with_sentinel() {
     if [[ -n "$sentinel_file" ]]; then
         rm -f "$sentinel_file"
     fi
-    $kilo_bin run --auto "$prompt" &
+
+    if [[ "$session_mode" =~ ^continue: ]]; then
+        local sid="${session_mode#continue:}"
+        $kilo_bin run --auto --continue --session "$sid" "$prompt" &
+    elif [[ "$session_mode" =~ ^new: ]]; then
+        local title="${session_mode#new:}"
+        $kilo_bin run --auto --title "$title" "$prompt" &
+    else
+        $kilo_bin run --auto "$prompt" &
+    fi
+
     local kilo_pid=$!
 
     log_message "INFO" "Kilo PID: $kilo_pid, monitoring for $sentinel_file..."
@@ -813,6 +863,42 @@ extract_feature_name() {
     local dirname=$(dirname "$tasks_path")
     local basename=$(basename "$dirname")
     echo "$basename"
+}
+
+sanitize_session_title() {
+    local raw="$1"
+    echo "$raw" | sed 's/[^a-zA-Z0-9._-]/_/g'
+}
+
+extract_coordinator_session_id() {
+    local session_title="$1"
+    local max_attempts="${2:-3}"
+    local sleep_seconds="${3:-2}"
+    local attempt=1
+
+    if ! command -v jq >/dev/null 2>&1; then
+        print_status "error" "jq required for coordinator session lookup"
+        echo ""
+        return 1
+    fi
+
+    while [[ $attempt -le $max_attempts ]]; do
+        local session_json
+        session_json=$(timeout 5 $KILO_CMD session list --format json --search "$session_title" --max-count 1 2>/dev/null)
+        local sid
+        sid=$(echo "$session_json" | jq -r '.[0].id // empty' 2>/dev/null)
+        if [[ -n "$sid" ]]; then
+            echo "$sid"
+            return 0
+        fi
+        if [[ $attempt -lt $max_attempts ]]; then
+            $SLEEP_CMD "$sleep_seconds"
+        fi
+        ((attempt++))
+    done
+    print_status "warning" "Coordinator session not found after $max_attempts attempts (title: $session_title)"
+    echo ""
+    return 1
 }
 #endregion
 
@@ -1141,6 +1227,7 @@ main() {
     local failed_tasks="[]"
     local task_rejection_counts="{}"
     local max_total_attempts=$((MAX_ITERATIONS * MAX_TOTAL_ATTEMPTS_MULTIPLIER))
+    local coordinator_session_id=""
     
     load_state
 
@@ -1232,7 +1319,7 @@ main() {
         
         local exit_code
         set +e
-        run_kilo_with_sentinel "$next_task" "$PROMPT" "$PENDING_TASKS_FILE" "$PENDING_GRACE_SECONDS"
+        run_kilo_with_sentinel "$next_task" "$PROMPT" "$PENDING_TASKS_FILE" "$PENDING_GRACE_SECONDS" ""
         exit_code=$?
         set -e
         
@@ -1372,6 +1459,8 @@ main() {
             
             print_status "info" "Задача $pending_task_id отклонена $current_rejections/$MAX_TASK_REJECTIONS раз"
             
+            save_state "REJECTED" "$iteration" "$pending_task_id"
+            
             if [[ $current_rejections -ge $MAX_TASK_REJECTIONS ]]; then
                 print_status "error" "Задача $pending_task_id отклонена $MAX_TASK_REJECTIONS раз — escalation"
                 create_escalation_for_review_failure "$pending_task_id"
@@ -1379,20 +1468,36 @@ main() {
                 exit 1
             fi
             
-            
             if [[ $iteration -ge $MAX_ITERATIONS ]]; then
                 print_status "error" "Достигнут максимум итераций"
                 print_summary "$tasks_completed" "MAX_ITERATIONS_REACHED" "$total_attempts"
                 exit 1
             fi
             
-            save_state "REJECTED" "$iteration" "$pending_task_id"
             continue
         fi
         
         # =====================================================
         # ФАЗА 3: Пометить выполненной и закоммитить
         # =====================================================
+        
+        # Cleanup coordinator session after APPROVED
+        if [[ -n "$coordinator_session_id" ]]; then
+            local delete_attempt=1
+            local delete_max=3
+            while [[ $delete_attempt -le $delete_max ]]; do
+                if timeout 5 $KILO_CMD session delete "$coordinator_session_id" 2>/dev/null; then
+                    print_status "info" "Coordinator session deleted: $coordinator_session_id"
+                    break
+                fi
+                if [[ $delete_attempt -lt $delete_max ]]; then
+                    print_status "warning" "Failed to delete session (attempt $delete_attempt/$delete_max)"
+                    $SLEEP_CMD 1
+                fi
+                ((delete_attempt++))
+            done
+            coordinator_session_id=""
+        fi
         
         task_rejection_counts=$(echo "$task_rejection_counts" | jq --arg t "$pending_task_id" 'del(.[$t])' 2>/dev/null || echo "{}")
         save_state "COMMITTING" "$iteration" "$pending_task_id"
