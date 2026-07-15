@@ -29,6 +29,12 @@ setup() {
     echo "Test prompt" > .kilo/prompts/task-iterate.md
     echo "Test review prompt" > .kilo/prompts/task-review.md
     
+    # Build/test gate config (minimal: both commands are no-ops)
+    cat > .kilo/task_loop.yaml << 'EOF'
+build_command: "true"
+test_command: "true"
+EOF
+    
     git init -q
     git config user.email "test@test.com"
     git config user.name "Test User"
@@ -102,6 +108,38 @@ source_functions() {
         echo "$path"
     }
     
+    parse_frontmatter_deps() {
+        local task_file="$1"
+        if [[ ! -f "$task_file" ]]; then
+            echo ""
+            return 1
+        fi
+        grep '^dependencies:' "$task_file" 2>/dev/null | \
+            sed -n 's/^dependencies: \[\(.*\)\]/\1/p' | \
+            tr -d ' ' | tr ',' '\n' | \
+            grep -E '^T[0-9]+$' || echo ""
+    }
+
+    is_task_completed() {
+        local task_id="$1"
+        local tasks_file="$2"
+        grep -qE "^\s*-\s*\[x\]\s+${task_id}" "$tasks_file" 2>/dev/null
+    }
+
+    check_dependencies() {
+        local task_file="$1"
+        local tasks_file="$2"
+        local deps
+        deps=$(parse_frontmatter_deps "$task_file")
+        [[ -z "$deps" ]] && return 0
+        for dep in $deps; do
+            if ! is_task_completed "$dep" "$tasks_file"; then
+                return 1
+            fi
+        done
+        return 0
+    }
+
     parse_frontmatter_decision() {
         local file="$1"
         
@@ -177,6 +215,28 @@ source_functions() {
     get_first_incomplete_task() {
         local tasks_file="$1"
         grep -m 1 "^\s*-\s*\[ \]" "$tasks_file" 2>/dev/null | grep -oE 'T[0-9]+' || echo ""
+    }
+    
+    get_next_executable_task() {
+        local tasks_file="$1"
+        local tasks_dir="$2"
+        
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if echo "$line" | grep -qE '^\s*-\s*\[ \]\s+[A-Z0-9-]+'; then
+                local task_id=$(echo "$line" | grep -oE '[A-Z]+-[0-9]+|T[0-9]+' | head -1)
+                local task_file="$tasks_dir/${task_id}.md"
+                if [[ ! -f "$task_file" ]]; then
+                    print_status "failure" "Task file not found: $task_file"
+                    continue
+                fi
+                if check_dependencies "$task_file" "$tasks_file"; then
+                    echo "$task_id"
+                    return 0
+                fi
+            fi
+        done < "$tasks_file"
+        
+        echo ""
     }
     
     mark_task_completed() {
@@ -423,6 +483,56 @@ EOF
         echo "Expected empty, got $result" >&2
         return 1
     fi
+}
+
+# =====================================================
+# ТЕСТЫ: get_next_executable_task() — баг с последней строкой без \n
+# =====================================================
+
+test_get_next_executable_task_finds_last_task_without_newline() {
+    source_functions
+
+    local tasks_dir="$TEST_TMP_DIR/tasks"
+    mkdir -p "$tasks_dir"
+    
+    # Создаём tasks.md БЕЗ завершающего \n в конце последней строки
+    printf '# Tasks\n\n- [ ] T001: First\n- [ ] T002: Last without newline' > "$TEST_TMP_DIR/tasks.md"
+    
+    # Создаём файлы задач (нужны для check_dependencies)
+    cat > "$tasks_dir/T001.md" << 'EOF'
+---
+id: T001
+---
+EOF
+    cat > "$tasks_dir/T002.md" << 'EOF'
+---
+id: T002
+---
+EOF
+    
+    local result
+    result=$(get_next_executable_task "$TEST_TMP_DIR/tasks.md" "$tasks_dir")
+    
+    if [[ "$result" != "T001" ]]; then
+        echo "RED: get_next_executable_task should return T001 (first incomplete task), got '$result'" >&2
+        return 1
+    fi
+    
+    # Теперь пометим T001 как выполненный
+    sed -i '' 's/- \[ \] T001/- [x] T001/' "$TEST_TMP_DIR/tasks.md"
+    
+    result=$(get_next_executable_task "$TEST_TMP_DIR/tasks.md" "$tasks_dir")
+    
+    if [[ "$result" != "T002" ]]; then
+        echo "BUG: get_next_executable_task should return T002 (last line, no trailing newline), got '$result'" >&2
+        echo "tasks.md content:" >&2
+        cat -v "$TEST_TMP_DIR/tasks.md" >&2
+        echo "" >&2
+        echo "line count: $(wc -l < "$TEST_TMP_DIR/tasks.md")" >&2
+        return 1
+    fi
+    
+    return 0
 }
 
 # =====================================================
@@ -2726,6 +2836,8 @@ main() {
     
     run_test "get_first_incomplete_task возвращает первую" test_get_first_incomplete_task_returns_first
     run_test "get_first_incomplete_task возвращает пусто если все выполнены" test_get_first_incomplete_task_returns_empty_when_complete
+    
+    run_test "get_next_executable_task находит последнюю задачу без \\n" test_get_next_executable_task_finds_last_task_without_newline
     
     run_test "mark_task_completed помечает корректно" test_mark_task_completed_marks_correctly
     

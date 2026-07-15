@@ -117,7 +117,7 @@ validate_tasks_integrity() {
     local tasks_dir="$2"
     local errors=0
     
-    while IFS= read -r line; do
+    while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ $line =~ ^-\ \[\ \]\ .*(T[0-9]+) ]]; then
             local task_id="${BASH_REMATCH[1]}"
             if [[ ! -f "$tasks_dir/${task_id}.md" ]]; then
@@ -145,7 +145,7 @@ detect_dependency_cycles() {
     local dep_graph_file
     dep_graph_file=$(mktemp)
     
-    while IFS= read -r line; do
+    while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ $line =~ ^-\ \[\ \]\ .*(T[0-9]+) ]]; then
             local task_id="${BASH_REMATCH[1]}"
             local task_file="$tasks_dir/${task_id}.md"
@@ -407,7 +407,7 @@ get_next_executable_task() {
     local tasks_file="$1"
     local tasks_dir="$2"
     
-    while IFS= read -r line; do
+    while IFS= read -r line || [[ -n "$line" ]]; do
         if echo "$line" | grep -qE '^\s*-\s*\[ \]\s+[A-Z0-9-]+'; then
             local task_id=$(echo "$line" | grep -oE '[A-Z]+-[0-9]+|T[0-9]+' | head -1)
             
