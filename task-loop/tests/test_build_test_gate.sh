@@ -593,6 +593,40 @@ test_summarize_output_incomplete_test_summary() {
 }
 
 # =====================================================
+# TESTS: missing config (check_task_loop_config)
+# =====================================================
+
+test_no_config_exits_with_1() {
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    mkdir -p "$tmp_dir/.kilo"
+
+    local rc=0
+    local output
+    output=$(bash -c '
+        set +euo pipefail
+        SCRIPT_DIR_TASK_LOOP="'"$TASK_LOOP_DIR"'"
+        TEST_TMP_DIR="'"$tmp_dir"'"
+
+        eval "$(sed -n "1,/^#region Main/p" "$SCRIPT_DIR_TASK_LOOP/scripts/task_loop.sh" | grep -v "^readonly " | grep -v "^set -" | grep -v "^umask ")"
+
+        PROJECT_ROOT="$TEST_TMP_DIR"
+
+        check_task_loop_config "$TEST_TMP_DIR" 2>&1
+    ' 2>&1) || rc=$?
+
+    rm -rf "$tmp_dir"
+
+    if [[ $rc -eq 1 ]] && echo "$output" | grep -q "конфиг не найден"; then
+        return 0
+    fi
+
+    echo "FAIL: expected exit 1 with config message, rc=$rc" >&2
+    echo "output: $output" >&2
+    return 1
+}
+
+# =====================================================
 # Main
 # =====================================================
 
@@ -630,6 +664,8 @@ main() {
     run_test "build skipped when no build_command" test_build_skip_when_no_build_command
     run_test "test skipped after build failure" test_test_skipped_after_build_failure
     run_test "main loop saves TEST_FAILED state" test_main_loop_saves_test_failed_state
+
+    run_test "no config -> exit 1" test_no_config_exits_with_1
 
     run_test "summarize_output: русский build success" test_summarize_output_ru_build_success
     run_test "summarize_output: английский build success" test_summarize_output_en_build_success

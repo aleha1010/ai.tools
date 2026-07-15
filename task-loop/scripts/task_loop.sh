@@ -1071,6 +1071,17 @@ summarize_output() {
 #endregion
 
 #region Функции build/test gate
+check_task_loop_config() {
+    local project_root="$1"
+    local config_file="${project_root}/.kilo/task_loop.yaml"
+
+    if [[ ! -f "$config_file" ]]; then
+        print_config_instruction "$project_root"
+        print_status "error" "Build/test gate: конфиг не найден, выполнение остановлено"
+        exit 1
+    fi
+}
+
 run_build_test_gate() {
     local project_root="$1"
     local config_file="${project_root}/.kilo/task_loop.yaml"
@@ -1161,6 +1172,8 @@ main() {
     
     PROJECT_ROOT=$($GIT_CMD rev-parse --show-toplevel 2>/dev/null || pwd)
     PROJECT_ROOT=$(realpath "$PROJECT_ROOT")
+    
+    check_task_loop_config "$PROJECT_ROOT"
     
     TASKS_PATH=$(validate_path "$TASKS_PATH" "tasks.md") || exit 1
     
