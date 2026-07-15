@@ -1510,17 +1510,17 @@ main() {
             coordinator_session_id=""
         fi
         
-        task_rejection_counts=$(echo "$task_rejection_counts" | jq --arg t "$pending_task_id" 'del(.[$t])' 2>/dev/null || echo "{}")
-        save_state "COMMITTING" "$iteration" "$pending_task_id"
-        
+task_rejection_counts=$(echo "$task_rejection_counts" | jq --arg t "$pending_task_id" 'del(.[$t])' 2>/dev/null || echo "{}")
         mark_task_completed "$TASKS_PATH" "$pending_task_id"
+        ((tasks_completed++))
+        
+        save_state "COMMITTING" "$iteration" "$pending_task_id"
         
         if [[ "$NO_COMMIT" != "true" ]]; then
             do_commit "$FEATURE_NAME" "$pending_task_id" "$iteration"
         else
             print_status "info" "Коммит пропущен (--no-commit)"
         fi
-        ((tasks_completed++))
         
         rm -f "$PENDING_TASKS_FILE"
         

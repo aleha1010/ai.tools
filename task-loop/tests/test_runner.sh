@@ -481,6 +481,55 @@ test_save_state_contains_correct_values() {
     fi
 }
 
+test_tasks_completed_counter_in_committed_state() {
+    source_functions
+    
+    save_state() {
+        local state="$1"
+        local iteration="$2"
+        local current_task="$3"
+        cat > "$STATE_FILE" << EOF
+{
+  "state": "$state",
+  "iteration": $iteration,
+  "current_task": "$current_task",
+  "tasks_completed": ${tasks_completed:-0},
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "pid": $$
+}
+EOF
+    }
+    
+    local tasks_file="$TEST_TMP_DIR/specs/001-test/tasks.md"
+    
+    # RED phase: buggy sequence — increment AFTER save_state
+    # state.json has stale tasks_completed=2
+    tasks_completed=2
+    save_state "COMMITTING" "1" "T001"
+    ((tasks_completed++))
+    
+    local saved_count
+    saved_count=$(jq -r '.tasks_completed // 0' "$STATE_FILE" 2>/dev/null)
+    if [[ "$saved_count" -ne 2 ]]; then
+        echo "RED phase failed: expected stale tasks_completed=2, got $saved_count" >&2
+        return 1
+    fi
+    
+    # GREEN phase: fixed sequence — increment BEFORE save_state
+    # state.json has correct tasks_completed=3
+    tasks_completed=2
+    ((tasks_completed++))
+    save_state "COMMITTING" "1" "T001"
+    
+    saved_count=$(jq -r '.tasks_completed // 0' "$STATE_FILE" 2>/dev/null)
+    if [[ "$saved_count" -ne 3 ]]; then
+        echo "GREEN phase failed: expected tasks_completed=3, got $saved_count" >&2
+        return 1
+    fi
+    
+    return 0
+}
+
 # =====================================================
 # ТЕСТЫ: print_status()
 # =====================================================
@@ -2682,6 +2731,7 @@ main() {
     
     run_test "save_state создаёт валидный JSON" test_save_state_creates_valid_json
     run_test "save_state содержит корректные значения" test_save_state_contains_correct_values
+    run_test "tasks_completed is correct in committed state.json" test_tasks_completed_counter_in_committed_state
     
     run_test "print_status success" test_print_status_success
     run_test "print_status error" test_print_status_error

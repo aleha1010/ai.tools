@@ -2,5 +2,6 @@ config.json
 .env
 *.secret
 .kilo/plans/
+.kilo/reviews/
 .kilo/package-lock.json
 .kilo/agent-manager.json
