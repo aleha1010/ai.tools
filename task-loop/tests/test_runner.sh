@@ -2192,6 +2192,82 @@ SCRIPT
     fi
 }
 
+test_extract_coordinator_session_id_warning_in_stderr() {
+    local mock_bin="$TEST_TMP_DIR/mock_kilo_empty2"
+    _mock_kilo_session_list "empty" "$mock_bin"
+
+    local test_script="$TEST_TMP_DIR/test_extract_stderr.sh"
+    cat > "$test_script" << 'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+KILO_CMD="$1"
+SLEEP_CMD="true"
+
+extract_coordinator_session_id() {
+    local session_title="$1"
+    local max_attempts="${2:-3}"
+    local sleep_seconds="${3:-2}"
+    local attempt=1
+
+    if ! command -v jq >/dev/null 2>&1; then
+        echo ""
+        return 1
+    fi
+
+    while [[ $attempt -le $max_attempts ]]; do
+        local session_json
+        session_json=$($KILO_CMD 2>/dev/null)
+        local sid
+        sid=$(echo "$session_json" | jq -r '.[0].id // empty' 2>/dev/null)
+        if [[ -n "$sid" ]]; then
+            echo "$sid"
+            return 0
+        fi
+        if [[ $attempt -lt $max_attempts ]]; then
+            "$SLEEP_CMD" "$sleep_seconds"
+        fi
+        ((attempt++))
+    done
+    echo ""
+    return 1
+}
+
+set +e
+stdout=$(extract_coordinator_session_id "test-title" 1 1 2>/tmp/extract_stderr_$$)
+rc=$?
+set -e
+stderr=$(cat /tmp/extract_stderr_$$ 2>/dev/null || echo "")
+rm -f /tmp/extract_stderr_$$
+
+echo "STDOUT=[$stdout]"
+echo "STDERR=[$stderr]"
+echo "EXIT:$rc"
+SCRIPT
+    chmod +x "$test_script"
+
+    local result
+    result=$(cd "$TEST_TMP_DIR" && bash "$test_script" "$mock_bin" 2>/dev/null || true)
+
+    local stdout_line
+    stdout_line=$(echo "$result" | grep "^STDOUT=" || true)
+    local stderr_line
+    stderr_line=$(echo "$result" | grep "^STDERR=" || true)
+    local exit_code
+    exit_code=$(echo "$result" | grep "EXIT:" | cut -d: -f2)
+
+    local stdout_val
+    stdout_val=$(echo "$stdout_line" | sed 's/^STDOUT=\[\(.*\)\]$/\1/')
+    local stderr_val
+    stderr_val=$(echo "$stderr_line" | sed 's/^STDERR=\[\(.*\)\]$/\1/')
+
+    if [[ -z "$stdout_val" && -z "$stderr_val" && "$exit_code" == "1" ]]; then
+        return 0
+    else
+        echo "Expected empty stdout + empty stderr + exit 1, got stdout='$stdout_val' stderr='$stderr_val' exit:$exit_code" >&2
+        return 1
+    fi
+}
+
 test_sanitize_session_title() {
     local result
     result=$(cd "$TEST_TMP_DIR" && bash -c '
@@ -2641,6 +2717,7 @@ main() {
     run_test "extract_coordinator_session_id успех" test_extract_coordinator_session_id_success
     run_test "extract_coordinator_session_id пустой список" test_extract_coordinator_session_id_empty
     run_test "extract_coordinator_session_id ошибка kilo" test_extract_coordinator_session_id_error
+    run_test "extract_coordinator_session_id warning в stderr, не в stdout" test_extract_coordinator_session_id_warning_in_stderr
     run_test "sanitize_session_title фильтрует спецсимволы" test_sanitize_session_title
     run_test "run_kilo_dispatch: new/continue/plain" test_run_kilo_dispatch
     run_test "coordinator session: new на 1-м, continue на 2-м вызове" test_coordinator_session_continues_on_rejected

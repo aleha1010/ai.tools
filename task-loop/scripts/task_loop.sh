@@ -877,7 +877,6 @@ extract_coordinator_session_id() {
     local attempt=1
 
     if ! command -v jq >/dev/null 2>&1; then
-        print_status "error" "jq required for coordinator session lookup"
         echo ""
         return 1
     fi
@@ -896,7 +895,6 @@ extract_coordinator_session_id() {
         fi
         ((attempt++))
     done
-    print_status "warning" "Coordinator session not found after $max_attempts attempts (title: $session_title)"
     echo ""
     return 1
 }
